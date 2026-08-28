@@ -112,7 +112,7 @@ export default function App() {
   if (loading) return <main className="loading">Abrindo o livro-caixa…</main>
 
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><img src="/dragon-mark.svg" alt="" /><div><span>Livro-caixa</span><h1>Carteira do Dragão</h1></div></div><button className="text-button" onClick={exportBackup}>Exportar</button></header>
+    <header className="topbar"><div className="brand"><img src={`${import.meta.env.BASE_URL}dragon-mark.svg`} alt="" /><div><span>Livro-caixa</span><h1>Carteira do Dragão</h1></div></div><button className="text-button" onClick={exportBackup}>Exportar</button></header>
     {notice && <p className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Fechar aviso">×</button></p>}
     <section className="characters" aria-label="Personagens">
       <div className="section-heading"><h2>Personagens</h2><CharacterForm onAdd={addCharacter} /></div>
