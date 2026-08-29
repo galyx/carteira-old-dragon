@@ -1,11 +1,12 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { balanceOf, formatMoney, signedValue, toPence } from './currency'
 import { db } from './database'
+import { TavernPanel } from './tavern'
 import type { Backup, Character, CurrencyInput, Transaction } from './types'
 
 const emptyCurrency: CurrencyInput = { crowns: 0, shillings: 0, pence: 0 }
 const today = () => new Date().toISOString().slice(0, 10)
-const uid = () => crypto.randomUUID()
+const uid = () => crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16)).join('-')
 
 function validBackup(value: unknown): value is Backup {
   if (!value || typeof value !== 'object') return false
@@ -31,6 +32,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState('')
+  const [screen, setScreen] = useState<'wallet' | 'master'>('wallet')
   const importInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -111,14 +113,16 @@ export default function App() {
 
   if (loading) return <main className="loading">Abrindo o livro-caixa…</main>
 
+  const masterActor: Character = selected ?? { id: '__mestre__', name: 'Mestre', createdAt: new Date().toISOString() }
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><img src={`${import.meta.env.BASE_URL}dragon-mark.svg`} alt="" /><div><span>Livro-caixa</span><h1>Carteira do Dragão</h1></div></div><button className="text-button" onClick={exportBackup}>Exportar</button></header>
+    <nav className="app-nav"><button className={screen === 'wallet' ? 'active' : ''} onClick={() => setScreen('wallet')}>Minha carteira</button><button className={screen === 'master' ? 'active' : ''} onClick={() => setScreen('master')}>Sou Mestre</button></nav>
     {notice && <p className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Fechar aviso">×</button></p>}
-    <section className="characters" aria-label="Personagens">
+    {screen === 'wallet' && <section className="characters" aria-label="Personagens">
       <div className="section-heading"><h2>Personagens</h2><CharacterForm onAdd={addCharacter} /></div>
       {characters.length > 0 && <div className="character-tabs">{characters.map((character) => <button key={character.id} className={character.id === selectedId ? 'active' : ''} onClick={() => setSelectedId(character.id)}>{character.name}</button>)}</div>}
-    </section>
-    {selected ? <Wallet character={selected} transactions={characterTransactions} onSave={saveTransaction} onDelete={removeTransaction} onRename={renameCharacter} onDeleteCharacter={deleteCharacter} /> : <EmptyState onAdd={addCharacter} />}
+    </section>}
+    {screen === 'master' ? <section className="master-screen"><p className="eyebrow">Mestre</p><h2>Histórias e instituições</h2><p className="muted">Crie a História, personagens compartilhados, Tavernas, Bancos e permissões. Jogadores entram apenas pelo QR.</p><TavernPanel character={masterActor} transactions={[]} onSave={saveTransaction} allowHost /></section> : selected ? <Wallet character={selected} transactions={characterTransactions} onSave={saveTransaction} onDelete={removeTransaction} onRename={renameCharacter} onDeleteCharacter={deleteCharacter} /> : <EmptyState onAdd={addCharacter} />}
     <footer><button className="text-button" onClick={() => importInput.current?.click()}>Importar backup</button><input ref={importInput} onChange={importBackup} type="file" accept="application/json,.json" hidden /> <span>Dados salvos somente neste aparelho.</span></footer>
   </main>
 }
@@ -145,6 +149,7 @@ function Wallet({ character, transactions, onSave, onDelete, onRename, onDeleteC
     <div className="wallet-heading"><div><p>Carteira de</p><h2>{character.name}</h2></div><div className="character-actions"><button onClick={onRename}>Renomear</button><button className="danger" onClick={onDeleteCharacter}>Excluir</button></div></div>
     <div className={balance < 0 ? 'balance-card negative' : 'balance-card'}><span>Saldo atual</span><strong>{formatMoney(balance)}</strong><small>{balance < 0 ? 'Saldo em dívida' : 'Saldo disponível'}</small></div>
     <TransactionForm key={editing?.id ?? 'new'} characterId={character.id} existing={editing} onSave={async (item) => { await onSave(item); setEditing(null) }} onCancel={() => setEditing(null)} />
+    <TavernPanel character={character} transactions={transactions} onSave={onSave} allowHost={false} />
     <section className="history"><h2>Histórico</h2>{withBalances.length === 0 ? <p className="muted">Ainda não há lançamentos.</p> : <ul>{withBalances.map(({ item, balance: after }) => <li key={item.id}><div className={`movement-icon ${item.type}`}>{item.type === 'income' ? '+' : '−'}</div><div className="movement-main"><strong>{item.description || (item.type === 'income' ? 'Ganho' : 'Gasto')}</strong><span>{new Date(`${item.date}T12:00:00`).toLocaleDateString('pt-BR')} · saldo: {formatMoney(after)}</span></div><div className={`amount ${item.type}`}>{item.type === 'income' ? '+' : '−'}{formatMoney(item.totalPence)}<div><button onClick={() => setEditing(item)}>Editar</button><button className="danger" onClick={() => onDelete(item.id)}>Excluir</button></div></div></li>)}</ul>}</section>
   </section>
 }

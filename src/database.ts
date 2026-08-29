@@ -1,9 +1,12 @@
-import type { Character, Transaction } from './types'
+import type { Character, MasterSession, PlayerStoryAccess, Story, Transaction } from './types'
 
 const DATABASE = 'carteira-do-dragao'
-const VERSION = 1
+const VERSION = 4
 const CHARACTERS = 'characters'
 const TRANSACTIONS = 'transactions'
+const MASTER_SESSION = 'masterSession'
+const STORIES = 'stories'
+const PLAYER_STORIES = 'playerStories'
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -16,6 +19,9 @@ function openDatabase(): Promise<IDBDatabase> {
         const store = db.createObjectStore(TRANSACTIONS, { keyPath: 'id' })
         store.createIndex('characterId', 'characterId')
       }
+      if (!db.objectStoreNames.contains(MASTER_SESSION)) db.createObjectStore(MASTER_SESSION, { keyPath: 'id' })
+      if (!db.objectStoreNames.contains(STORIES)) db.createObjectStore(STORIES, { keyPath: 'id' })
+      if (!db.objectStoreNames.contains(PLAYER_STORIES)) db.createObjectStore(PLAYER_STORIES, { keyPath: 'id' })
     }
     request.onsuccess = () => resolve(request.result)
   })
@@ -51,8 +57,15 @@ async function remove(store: string, id: string): Promise<void> {
 export const db = {
   getCharacters: () => readAll<Character>(CHARACTERS),
   getTransactions: () => readAll<Transaction>(TRANSACTIONS),
+  getMasterSessions: () => readAll<MasterSession>(MASTER_SESSION),
+  getStories: () => readAll<Story>(STORIES),
+  getPlayerStories: () => readAll<PlayerStoryAccess>(PLAYER_STORIES),
   saveCharacter: (character: Character) => put(CHARACTERS, character),
   saveTransaction: (transaction: Transaction) => put(TRANSACTIONS, transaction),
+  saveMasterSession: (session: MasterSession) => put(MASTER_SESSION, session),
+  saveStory: (story: Story) => put(STORIES, story),
+  savePlayerStory: (access: PlayerStoryAccess) => put(PLAYER_STORIES, access),
+  deleteStory: (id: string) => remove(STORIES, id),
   deleteCharacter: (id: string) => remove(CHARACTERS, id),
   deleteTransaction: (id: string) => remove(TRANSACTIONS, id),
   async deleteCharacterAndTransactions(id: string): Promise<void> {
