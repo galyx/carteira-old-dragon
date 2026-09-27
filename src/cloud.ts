@@ -25,6 +25,8 @@ export type InstitutionOperationResult = {
   access?: PlayerStoryAccess
   /** Para conversões: só aplica na carteira quando true (aprovação do mestre). */
   applyWallet?: boolean
+  /** Estado da história após processar (evita race ao publicar no Supabase). */
+  nextStory?: Story
 }
 
 export type CloudMember = {

@@ -58,8 +58,16 @@ export function MasterCloudSession({
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null)
   const storyRef = useRef(story)
   const processing = useRef(false)
+  const opHandlerRef = useRef(onInstitutionOperation)
+  const accessForRef = useRef(storyAccessFor)
+  const onSaveRef = useRef(onSave)
+  const onToastRef = useRef(onToast)
 
   useEffect(() => { storyRef.current = story }, [story])
+  useEffect(() => { opHandlerRef.current = onInstitutionOperation }, [onInstitutionOperation])
+  useEffect(() => { accessForRef.current = storyAccessFor }, [storyAccessFor])
+  useEffect(() => { onSaveRef.current = onSave }, [onSave])
+  useEffect(() => { onToastRef.current = onToast }, [onToast])
 
   async function refreshMembers(mesaId: string) {
     setMembers(await listMembers(mesaId))
@@ -121,23 +129,18 @@ export function MasterCloudSession({
       if (processing.current) return
       processing.current = true
       try {
-        const current = storyRef.current
-        if (current.cloudMesaId && current.masterKey) {
-          await pushStory(current.cloudMesaId, current.masterKey, current)
-        }
         await refreshMembers(mesaId!)
         const pending = await fetchPendingMessages(mesaId!, ['operation'])
         for (const message of pending) {
           const operation = message.payload as InstitutionOperation
-          const result = await onInstitutionOperation(operation)
+          const result = await opHandlerRef.current(operation)
+          if (result.nextStory) storyRef.current = result.nextStory
           if (result.ok && result.access === undefined) {
-            result.access = storyAccessFor(operation.characterId, storyRef.current) ?? undefined
+            result.access = accessForRef.current(operation.characterId, storyRef.current) ?? undefined
           }
-          await postMessage(mesaId!, 'operation-result', result, operation.characterId)
+          const { nextStory: _ignored, ...payload } = result
+          await postMessage(mesaId!, 'operation-result', payload, operation.characterId)
           await markMessagesConsumed([message.id as string])
-          if (result.ok && !storyRef.current.members.some((item) => item.characterId === operation.characterId)) {
-            // member should already exist via join
-          }
         }
 
         const joined = await listMembers(mesaId!)
@@ -157,12 +160,14 @@ export function MasterCloudSession({
               })),
             ],
           }
-          await onSave(nextStory)
+          await onSaveRef.current(nextStory)
           storyRef.current = nextStory
-          if (nextStory.cloudMesaId && nextStory.masterKey) {
-            await pushStory(nextStory.cloudMesaId, nextStory.masterKey, nextStory)
-          }
-          onToast(`${missing.length} jogador(es) entraram na mesa.`)
+          onToastRef.current(`${missing.length} jogador(es) entraram na mesa.`)
+        }
+
+        const current = storyRef.current
+        if (current.cloudMesaId && current.masterKey) {
+          await pushStory(current.cloudMesaId, current.masterKey, current)
         }
       } catch (error) {
         console.error(error)
@@ -172,13 +177,13 @@ export function MasterCloudSession({
     }
 
     void tick()
-    const interval = window.setInterval(() => void tick(), 4000)
+    const interval = window.setInterval(() => void tick(), 2500)
     const channel = subscribeMesa(mesaId, () => void tick())
     return () => {
       window.clearInterval(interval)
       void supabaseRemove(channel)
     }
-  }, [story.cloudMesaId, onInstitutionOperation, onSave, onToast, storyAccessFor])
+  }, [story.cloudMesaId])
 
   const selected = members.find((item) => item.character_id === selectedMemberId) ?? null
 
@@ -241,7 +246,7 @@ export function PlayerCloudSession({
   transactions: Transaction[]
   access: PlayerStoryAccess | null
   onAccess: (access: PlayerStoryAccess) => Promise<void>
-  onOperationResult: (result: InstitutionOperationResult) => void
+  onOperationResult: (result: InstitutionOperationResult) => void | Promise<void>
   onOperationSender: (sender: ((operation: InstitutionOperation) => boolean) | null) => void
   onAccessRefreshSender: (sender: (() => boolean) | null) => void
 }) {
@@ -250,67 +255,89 @@ export function PlayerCloudSession({
   const [status, setStatus] = useState(access ? `Você está na mesa “${access.storyName}”.` : '')
   const accessRef = useRef(access)
   const transactionsRef = useRef(transactions)
+  const onAccessRef = useRef(onAccess)
+  const onResultRef = useRef(onOperationResult)
+  const onSenderRef = useRef(onOperationSender)
+  const onRefreshRef = useRef(onAccessRefreshSender)
+  const syncing = useRef(false)
 
   useEffect(() => { accessRef.current = access }, [access])
   useEffect(() => { transactionsRef.current = transactions }, [transactions])
+  useEffect(() => { onAccessRef.current = onAccess }, [onAccess])
+  useEffect(() => { onResultRef.current = onOperationResult }, [onOperationResult])
+  useEffect(() => { onSenderRef.current = onOperationSender }, [onOperationSender])
+  useEffect(() => { onRefreshRef.current = onAccessRefreshSender }, [onAccessRefreshSender])
 
   useEffect(() => {
-    onOperationSender(access ? (operation) => {
-      const mesaId = accessRef.current?.cloudMesaId
-      if (!mesaId) return false
-      void postMessage(mesaId, 'operation', operation)
+    const mesaId = access?.cloudMesaId
+    if (!mesaId) {
+      onSenderRef.current(null)
+      onRefreshRef.current(null)
+      return () => {
+        onSenderRef.current(null)
+        onRefreshRef.current(null)
+      }
+    }
+
+    onSenderRef.current((operation) => {
+      const id = accessRef.current?.cloudMesaId
+      if (!id) return false
+      void postMessage(id, 'operation', operation)
       return true
-    } : null)
-    onAccessRefreshSender(access ? () => {
-      const mesaId = accessRef.current?.cloudMesaId
-      if (!mesaId) return false
+    })
+    onRefreshRef.current(() => {
+      const id = accessRef.current?.cloudMesaId
+      if (!id) return false
       void (async () => {
-        const story = await fetchStory(mesaId)
+        const story = await fetchStory(id)
         if (!story) return
-        const member = story.members.find((item) => item.characterId === character.id)
-        if (!member) return
-        const next = buildAccess(story, character.id, mesaId)
-        if (next) await onAccess(next)
+        const next = buildAccess(story, character.id, id)
+        if (next) await onAccessRef.current(next)
         setStatus('Sessão atualizada.')
       })()
       return true
-    } : null)
+    })
+
     return () => {
-      onOperationSender(null)
-      onAccessRefreshSender(null)
+      onSenderRef.current(null)
+      onRefreshRef.current(null)
     }
-  }, [access?.cloudMesaId, access?.id, character.id, onAccess, onAccessRefreshSender, onOperationSender])
+  }, [access?.cloudMesaId, character.id])
 
   useEffect(() => {
     const mesaId = access?.cloudMesaId
     if (!mesaId || !supabaseConfigured) return
 
     async function sync() {
+      if (syncing.current) return
+      syncing.current = true
       try {
         await pushMemberWallet(mesaId!, character.id, character.name, transactionsRef.current)
         const story = await fetchStory(mesaId!)
         if (story) {
           const next = buildAccess(story, character.id, mesaId!)
-          if (next) await onAccess(next)
+          if (next) await onAccessRef.current(next)
         }
         const results = await fetchPendingMessages(mesaId!, ['operation-result'], character.id)
         for (const message of results) {
-          onOperationResult(message.payload as InstitutionOperationResult)
+          await Promise.resolve(onResultRef.current(message.payload as InstitutionOperationResult))
         }
         if (results.length) await markMessagesConsumed(results.map((item) => item.id as string))
       } catch (error) {
         console.error(error)
+      } finally {
+        syncing.current = false
       }
     }
 
     void sync()
-    const interval = window.setInterval(() => void sync(), 4000)
+    const interval = window.setInterval(() => void sync(), 2500)
     const channel = subscribeMesa(mesaId, () => void sync())
     return () => {
       window.clearInterval(interval)
       void supabaseRemove(channel)
     }
-  }, [access?.cloudMesaId, character.id, character.name, onAccess, onOperationResult])
+  }, [access?.cloudMesaId, character.id, character.name])
 
   async function join(event: FormEvent) {
     event.preventDefault()
