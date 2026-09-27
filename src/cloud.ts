@@ -11,7 +11,7 @@ export type InstitutionOperation = {
   characterId: string
   institutionId: string
   institutionName: string
-  action: 'deposit' | 'withdraw' | 'depositRequest' | 'withdrawRequest' | 'loan' | 'loanAccept' | 'loanDecline' | 'convert'
+  action: 'deposit' | 'withdraw' | 'depositRequest' | 'withdrawRequest' | 'loan' | 'loanAccept' | 'loanDecline' | 'loanPay' | 'convert'
   description: string
   money: CurrencyInput
   requestId?: string

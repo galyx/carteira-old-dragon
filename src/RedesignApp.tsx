@@ -1,9 +1,9 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { MasterCloudSession, PlayerCloudSession } from './CloudSession'
 import { postMessage, type InstitutionOperation, type InstitutionOperationResult } from './cloud'
-import { addCoinBalances, bankConversionDelta, coinBalanceOf, formatCoins, fromPence, payWithChange, toPence } from './currency'
+import { addCoinBalances, bankConversionDelta, coinBalanceOf, formatCoins, formatMoney, fromPence, payWithChange, toPence } from './currency'
 import { db } from './database'
-import type { Character, CurrencyInput, LedgerEntry, PlayerStoryAccess, Story, StoryCharacter, StoryInstitution, Transaction } from './types'
+import type { Character, CurrencyInput, LedgerEntry, Loan, PlayerStoryAccess, Story, StoryCharacter, StoryInstitution, Transaction } from './types'
 
 const uid = () => crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16)).join('-')
 const today = () => new Date().toISOString().slice(0, 10)
@@ -81,7 +81,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
   function sendOperation(institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string): string | null {
     if (!operationSender) return 'Entre na mesa do mestre com o código antes de movimentar moedas.'
     if (action !== 'loanDecline' && !toPence(money)) return 'Informe ao menos uma moeda.'
-    if ((action === 'deposit' || action === 'depositRequest') && !payWithChange(balance, money)) return 'A carteira não possui valor suficiente para este depósito.'
+    if ((action === 'deposit' || action === 'depositRequest' || action === 'loanPay') && !payWithChange(balance, money)) return 'A carteira não possui valor suficiente.'
     if (action === 'convert' && !bankConversionDelta(balance, money)) return 'Informe só Coroas ou só Xelins para converter, com quantidade disponível na carteira.'
     const defaults: Partial<Record<InstitutionOperation['action'], string>> = {
       deposit: 'Depósito direto',
@@ -91,6 +91,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
       loan: 'Pedido de empréstimo',
       loanAccept: 'Empréstimo aceito',
       loanDecline: 'Empréstimo recusado',
+      loanPay: 'Pagamento de empréstimo',
       convert: 'Pedido de conversão ao banco',
     }
     const operation: InstitutionOperation = { type: 'institution-operation', id: uid(), characterId: character.id, institutionId: institution.id, institutionName: institution.name, action, description: description.trim() || defaults[action] || 'Operação', money, requestId }
@@ -112,17 +113,24 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
       await onSave({ id: uid(), characterId: character.id, type: 'income', description: `Conversão aprovada — ${operation.institutionName}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: operation.id, balanceDelta: delta, createdAt: new Date().toISOString() })
       return
     }
-    if (!['deposit', 'withdraw', 'loanAccept'].includes(operation.action)) {
+    if (!['deposit', 'withdraw', 'loanAccept', 'loanPay'].includes(operation.action)) {
       appliedOpsRef.current.delete(operation.id)
       return
     }
-    const payment = operation.action === 'deposit' ? payWithChange(coinBalanceOf(currentTransactions), operation.money) : null
-    if (operation.action === 'deposit' && !payment) { appliedOpsRef.current.delete(operation.id); return }
+    const spendsWallet = operation.action === 'deposit' || operation.action === 'loanPay'
+    const payment = spendsWallet ? payWithChange(coinBalanceOf(currentTransactions), operation.money) : null
+    if (spendsWallet && !payment) { appliedOpsRef.current.delete(operation.id); return }
+    const labels: Record<string, string> = {
+      deposit: `Depósito em ${operation.institutionName}`,
+      withdraw: `Retirada de ${operation.institutionName}`,
+      loanAccept: `Empréstimo de ${operation.institutionName}`,
+      loanPay: `Pagamento de empréstimo — ${operation.institutionName}`,
+    }
     await onSave({
       id: uid(),
       characterId: character.id,
-      type: operation.action === 'deposit' ? 'expense' : 'income',
-      description: operation.action === 'deposit' ? `Depósito em ${operation.institutionName}` : operation.action === 'withdraw' ? `Retirada de ${operation.institutionName}` : `Empréstimo de ${operation.institutionName}`,
+      type: spendsWallet ? 'expense' : 'income',
+      description: labels[operation.action] ?? operation.description,
       date: today(),
       ...operation.money,
       totalPence: toPence(operation.money),
@@ -141,7 +149,10 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
       {tab === 'wallet' && <PlayerWallet character={character} balance={balance} banks={convertBanks} connected={Boolean(operationSender)} notice={operationNotice} onSave={onSave} onConvert={(institution, money, description) => sendOperation(institution, 'convert', money, description)} />}
       {tab === 'institutions' && <PlayerInstitutions accesses={storyAccess} connected={Boolean(operationSender)} notice={operationNotice} onRefresh={() => accessRefresh?.() ?? false} onOperate={sendOperation} />}
       <section className="surface connection-keeper" hidden={tab !== 'session'}><PlayerCloudSession character={character} transactions={transactions} access={primaryAccess} onAccess={onAccess} onOperationResult={receiveOperation} onOperationSender={registerOperationSender} onAccessRefreshSender={registerAccessRefresh} /></section>
-      {tab === 'requests' && <PlayerRequests accesses={storyAccess} connected={Boolean(operationSender)} onDecision={sendOperation} />}
+      {tab === 'requests' && <>
+        <PlayerDebts accesses={storyAccess} balance={balance} connected={Boolean(operationSender)} notice={operationNotice} onPay={(institution, money, description, loanId) => sendOperation(institution, 'loanPay', money, description, loanId)} />
+        <PlayerRequests accesses={storyAccess} connected={Boolean(operationSender)} onDecision={sendOperation} />
+      </>}
       {tab === 'history' && <History entries={transactions} />}
     </Page>
     <BottomNav items={navItems} active={tab} onChange={(value) => setTab(value as typeof tab)} />
@@ -349,20 +360,62 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
     if (operation.action === 'loanAccept' || operation.action === 'loanDecline') {
       const request = current.requests.find((item) => item.id === operation.requestId && item.characterId === operation.characterId && item.status === 'pending-player')
       const loan = current.loans.find((item) => item.id === operation.requestId && item.status === 'pending')
-      if (!request || !loan) return { type: 'institution-operation-result', operation, ok: false, message: 'Esta proposta não está mais disponível.' }
+      if (!request || !loan) return { type: 'institution-operation-result', operation, ok: false, message: 'Esta proposta não está mais disponível.', applyWallet: false }
       if (operation.action === 'loanDecline') {
         const nextStory = { ...current, requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'declined' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'declined' as const } : item) }
         await onSave(nextStory)
-        return { type: 'institution-operation-result', operation, ok: true, message: 'Proposta de empréstimo recusada.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory }
+        return { type: 'institution-operation-result', operation, ok: true, message: 'Proposta de empréstimo recusada.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory, applyWallet: false }
       }
-      const payment = payWithChange(coinBalanceOf(institution.ledger), request.money)
-      if (!payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui mais moedas suficientes para liberar o empréstimo.' }
-      const authoritativeOperation = { ...operation, money: request.money, description: request.description }
+      const loanInstitution = current.institutions.find((item) => item.id === request.institutionId) ?? institution
+      const payment = payWithChange(coinBalanceOf(loanInstitution.ledger), request.money)
+      if (!payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui moedas suficientes para liberar o empréstimo.', applyWallet: false }
+      const authoritativeOperation: InstitutionOperation = {
+        ...operation,
+        id: request.id,
+        institutionId: loanInstitution.id,
+        institutionName: loanInstitution.name,
+        action: 'loanAccept',
+        money: request.money,
+        description: request.description,
+        requestId: request.id,
+      }
       const entry: LedgerEntry = { id: uid(), type: 'expense', description: `Empréstimo concedido a ${member.name}`, date: today(), ...request.money, totalPence: toPence(request.money), referenceId: request.id, balanceDelta: payment.balanceDelta, createdAt: new Date().toISOString() }
-      const nextInstitution = { ...institution, ledger: [...institution.ledger, entry] }
-      const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === institution.id ? nextInstitution : item), requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'active' as const } : item) }
+      const nextInstitution = { ...loanInstitution, ledger: [...loanInstitution.ledger, entry] }
+      const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === loanInstitution.id ? nextInstitution : item), requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'active' as const } : item) }
       await onSave(nextStory)
-      return { type: 'institution-operation-result', operation: authoritativeOperation, ok: true, message: 'Empréstimo aceito e moedas recebidas.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory, applyWallet: true }
+      return { type: 'institution-operation-result', operation: authoritativeOperation, ok: true, message: 'Empréstimo aceito. Moedas creditadas na carteira.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory, applyWallet: true }
+    }
+
+    if (operation.action === 'loanPay') {
+      const loan = current.loans.find((item) => item.id === operation.requestId && item.characterId === operation.characterId && item.status === 'active')
+      if (!loan) return { type: 'institution-operation-result', operation, ok: false, message: 'Empréstimo ativo não encontrado.', applyWallet: false }
+      const loanInstitution = current.institutions.find((item) => item.id === loan.institutionId)
+      if (!loanInstitution) return { type: 'institution-operation-result', operation, ok: false, message: 'Instituição do empréstimo não encontrada.', applyWallet: false }
+      const payPence = toPence(operation.money)
+      if (payPence <= 0) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe um valor para pagar.', applyWallet: false }
+      if (payPence > loan.remainingPence) return { type: 'institution-operation-result', operation, ok: false, message: `O valor ultrapassa o saldo devedor (${loan.remainingPence} Pences).`, applyWallet: false }
+      if (loanInstitution.ledger.some((entry) => entry.referenceId === operation.id)) {
+        return { type: 'institution-operation-result', operation, ok: true, message: 'Pagamento já registrado.', access: accessFor(operation.characterId, current) ?? undefined, nextStory: current, applyWallet: false }
+      }
+      const entry: LedgerEntry = { id: uid(), type: 'income', description: `Pagamento de empréstimo por ${member.name}${operation.description ? ` — ${operation.description}` : ''}`, date: today(), ...operation.money, totalPence: payPence, referenceId: operation.id, createdAt: new Date().toISOString() }
+      const remaining = loan.remainingPence - payPence
+      const nextLoan: Loan = { ...loan, remainingPence: remaining, status: remaining <= 0 ? 'paid' : 'active' }
+      const nextStory = {
+        ...current,
+        institutions: current.institutions.map((item) => item.id === loanInstitution.id ? { ...item, ledger: [...item.ledger, entry] } : item),
+        loans: current.loans.map((item) => item.id === loan.id ? nextLoan : item),
+        requests: current.requests.map((item) => item.type === 'charge' && item.characterId === operation.characterId && item.institutionId === loan.institutionId && item.status === 'pending-player' ? { ...item, status: 'accepted' as const } : item),
+      }
+      await onSave(nextStory)
+      return {
+        type: 'institution-operation-result',
+        operation: { ...operation, id: operation.id, institutionId: loanInstitution.id, institutionName: loanInstitution.name, action: 'loanPay' },
+        ok: true,
+        message: remaining <= 0 ? 'Empréstimo quitado!' : `Pagamento recebido. Restam ${remaining} Pences.`,
+        access: accessFor(operation.characterId, nextStory) ?? undefined,
+        nextStory,
+        applyWallet: true,
+      }
     }
 
     const permissions = member.permissions[institution.id] ?? []
@@ -421,10 +474,28 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
   const loanRequests = story.requests.filter((item) => item.type === 'loan')
   const convertRequests = story.requests.filter((item) => item.type === 'convert')
   const moneyRequests = story.requests.filter((item) => item.type === 'deposit' || item.type === 'withdraw')
+  const activeLoans = story.loans.filter((item) => item.status === 'active')
   const defaults = (id: string) => terms[id] ?? { interest: 10, installments: 3, dueDate: today() }
   const change = (id: string, values: Partial<ReturnType<typeof defaults>>) => setTerms((current) => ({ ...current, [id]: { ...defaults(id), ...values } }))
   async function approve(request: typeof loanRequests[number]) { const config = defaults(request.id); const principal = toPence(request.money); const total = Math.ceil(principal * (1 + config.interest / 100)); const installments = Math.max(1, config.installments); const loan = { id: request.id, characterId: request.characterId, institutionId: request.institutionId, principalPence: principal, interestPercent: config.interest, installments, installmentPence: Math.ceil(total / installments), remainingPence: total, dueDate: config.dueDate, status: 'pending' as const }; await onSave({ ...story, loans: [...story.loans.filter((item) => item.id !== loan.id), loan], requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'pending-player' as const } : item) }); onToast('Proposta enviada ao jogador.') }
   async function decline(requestId: string) { await onSave({ ...story, loans: story.loans.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item), requests: story.requests.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item) }); onToast('Pedido recusado.') }
+  async function chargeLoan(loan: Loan) {
+    const amount = fromPence(Math.min(loan.installmentPence, loan.remainingPence))
+    const member = story.members.find((item) => item.characterId === loan.characterId)
+    const institution = story.institutions.find((item) => item.id === loan.institutionId)
+    const request = {
+      id: uid(),
+      characterId: loan.characterId,
+      institutionId: loan.institutionId,
+      type: 'charge' as const,
+      money: { crowns: amount.crowns, shillings: amount.shillings, pence: amount.pence },
+      description: `Cobrança de parcela — ${institution?.name ?? 'instituição'} (empréstimo)`,
+      status: 'pending-player' as const,
+      createdAt: new Date().toISOString(),
+    }
+    await onSave({ ...story, requests: [...story.requests, request] })
+    onToast(`Cobrança enviada para ${member?.name ?? 'jogador'}: ${formatCoins(request.money)}.`)
+  }
   async function approveConvert(request: typeof convertRequests[number]) {
     const institution = story.institutions.find((item) => item.id === request.institutionId)
     const member = story.members.find((item) => item.characterId === request.characterId)
@@ -502,7 +573,23 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
     onToast('Depósito aprovado.')
   }
   return <section>
-    <div className="section-title"><div><p className="eyebrow">Aprovações</p><h3>Pedidos</h3></div></div>
+    <div className="section-title"><div><p className="eyebrow">Crédito ativo</p><h3>Empréstimos em aberto</h3></div></div>
+    {!activeLoans.length && <p className="helper">Nenhum empréstimo ativo. Quando o jogador aceitar uma proposta, a dívida aparece aqui.</p>}
+    {activeLoans.map((loan) => {
+      const member = story.members.find((item) => item.characterId === loan.characterId)
+      const institution = story.institutions.find((item) => item.id === loan.institutionId)
+      return <article className="request-card" key={loan.id}>
+        <small>{institution?.name ?? 'Instituição'} · {member?.name ?? 'Jogador'}</small>
+        <strong>Saldo devedor {formatMoney(loan.remainingPence)}</strong>
+        <div className="loan-terms">
+          <span>Parcela: <b>{formatMoney(loan.installmentPence)}</b></span>
+          <span>Juros: <b>{loan.interestPercent}%</b></span>
+          <span>Vencimento: <b>{new Date(`${loan.dueDate}T12:00:00`).toLocaleDateString('pt-BR')}</b></span>
+        </div>
+        <div className="request-actions"><button className="primary" onClick={() => void chargeLoan(loan)}>Cobrar parcela</button></div>
+      </article>
+    })}
+    <div className="section-title" style={{ marginTop: '1.25rem' }}><div><p className="eyebrow">Aprovações</p><h3>Pedidos</h3></div></div>
     {!loanRequests.length && !convertRequests.length && !moneyRequests.length && <EmptyState icon="◈" title="Nenhum pedido" text="Depósitos, retiradas, empréstimos e conversões aparecem aqui." />}
     {moneyRequests.map((request) => {
       const member = story.members.find((item) => item.characterId === request.characterId)
@@ -533,12 +620,85 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
   </section>
 }
 
+function PlayerDebts({ accesses, balance, connected, notice, onPay }: {
+  accesses: PlayerStoryAccess[]
+  balance: CurrencyInput
+  connected: boolean
+  notice: string
+  onPay: (institution: { id: string; name: string }, money: CurrencyInput, description: string, loanId: string) => string | null
+}) {
+  const debts = accesses.flatMap((access) => (access.loans ?? [])
+    .filter((loan) => loan.status === 'active' || loan.status === 'paid')
+    .map((loan) => ({
+      loan,
+      access,
+      institution: access.institutions.find((item) => item.id === loan.institutionId) ?? { id: loan.institutionId, name: 'Instituição' },
+    })))
+  const active = debts.filter((item) => item.loan.status === 'active')
+  const [payingId, setPayingId] = useState<string | null>(null)
+  const [money, setMoney] = useState(emptyMoney)
+  const [feedback, setFeedback] = useState('')
+  const current = active.find((item) => item.loan.id === payingId) ?? null
+
+  function openPay(loan: Loan, preset?: 'installment' | 'full') {
+    const remaining = fromPence(loan.remainingPence)
+    const installment = fromPence(Math.min(loan.installmentPence, loan.remainingPence))
+    setPayingId(loan.id)
+    setMoney(preset === 'full' ? { crowns: remaining.crowns, shillings: remaining.shillings, pence: remaining.pence } : { crowns: installment.crowns, shillings: installment.shillings, pence: installment.pence })
+    setFeedback('')
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!current) return
+    if (!payWithChange(balance, money)) { setFeedback('Moedas insuficientes na carteira.'); return }
+    if (toPence(money) > current.loan.remainingPence) { setFeedback('Valor maior que a dívida restante.'); return }
+    const error = onPay(current.institution, money, `Pagamento do empréstimo`, current.loan.id)
+    if (error) { setFeedback(error); return }
+    setFeedback('Pagamento enviado à instituição. Aguarde confirmação…')
+    setTimeout(() => setPayingId(null), 900)
+  }
+
+  return <section style={{ marginBottom: '1rem' }}>
+    <div className="section-title"><div><p className="eyebrow">Contas a pagar</p><h3>Empréstimos</h3></div></div>
+    {notice && <p className="operation-notice" role="status">{notice}</p>}
+    {!active.length && <p className="helper">Nenhuma dívida ativa no momento.</p>}
+    {active.map(({ loan, access, institution }) => <article className="request-card" key={loan.id}>
+      <small>{access.storyName} · {institution.name}</small>
+      <strong>Devendo {formatMoney(loan.remainingPence)}</strong>
+      <div className="loan-terms">
+        <span>Parcela: <b>{formatMoney(loan.installmentPence)}</b></span>
+        <span>Juros: <b>{loan.interestPercent}%</b></span>
+        <span>Parcelas: <b>{loan.installments}</b></span>
+        <span>Vencimento: <b>{new Date(`${loan.dueDate}T12:00:00`).toLocaleDateString('pt-BR')}</b></span>
+      </div>
+      <div className="request-actions">
+        <button className="primary" disabled={!connected} onClick={() => openPay(loan, 'installment')}>Pagar parcela</button>
+        <button disabled={!connected} onClick={() => openPay(loan, 'full')}>Quitar</button>
+      </div>
+    </article>)}
+    {payingId && current && <Modal title={`Pagar — ${current.institution.name}`} onClose={() => setPayingId(null)}>
+      <form className="clean-form" onSubmit={submit}>
+        <p className="helper">Restam {formatMoney(current.loan.remainingPence)}. O valor sai da sua carteira e entra na instituição do empréstimo.</p>
+        <MoneyFields money={money} setMoney={setMoney} />
+        {feedback && <p className={feedback.includes('enviado') ? 'success' : 'error'}>{feedback}</p>}
+        <button className="primary wide" disabled={!connected}>Confirmar pagamento</button>
+      </form>
+    </Modal>}
+  </section>
+}
+
 function PlayerRequests({ accesses, connected, onDecision }: { accesses: PlayerStoryAccess[]; connected: boolean; onDecision: (institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string) => string | null }) {
-  const requests = accesses.flatMap((access) => (access.requests ?? []).map((request) => ({ request, access, institution: access.institutions.find((item) => item.id === request.institutionId), loan: (access.loans ?? []).find((item) => item.id === request.id) }))).sort((a,b) => b.request.createdAt.localeCompare(a.request.createdAt))
-  if (!requests.length) return <EmptyState icon="✉" title="Nenhuma solicitação" text="Pedidos de depósito, retirada, empréstimo e conversão aparecem aqui." />
+  const requests = accesses.flatMap((access) => (access.requests ?? []).map((request) => ({
+    request,
+    access,
+    institution: access.institutions.find((item) => item.id === request.institutionId) ?? { id: request.institutionId, name: 'Instituição' },
+    loan: (access.loans ?? []).find((item) => item.id === request.id) ?? (access.loans ?? []).find((item) => item.institutionId === request.institutionId && item.status === 'active'),
+  }))).sort((a,b) => b.request.createdAt.localeCompare(a.request.createdAt))
+  if (!requests.length) return <EmptyState icon="✉" title="Nenhuma solicitação" text="Pedidos de depósito, retirada, empréstimo, cobrança e conversão aparecem aqui." />
   return <section><div className="section-title"><div><p className="eyebrow">Aguardando decisões</p><h3>Pedidos</h3></div></div>{requests.map(({ request, access, institution, loan }) => {
-    const kind = request.type === 'loan' ? 'Empréstimo' : request.type === 'convert' ? 'Conversão' : request.type === 'deposit' ? 'Depósito' : request.type === 'withdraw' ? 'Retirada' : 'Pedido'
-    return <article className="request-card" key={request.id}><small>{access.storyName} · {institution?.name ?? 'Instituição'} · {kind}</small><strong>{kind} de {formatCoins(request.money)}</strong><p>{request.description}</p>{request.status === 'pending-master' && <span className="status-pill offline">Aguardando o mestre</span>}{request.status === 'pending-player' && loan && <><div className="loan-terms"><span>Juros: <b>{loan.interestPercent}%</b></span><span>Parcelas: <b>{loan.installments}× de {loan.installmentPence} Pences</b></span><span>Total: <b>{loan.remainingPence} Pences</b></span></div><div className="request-actions"><button className="primary" disabled={!connected} onClick={() => institution && onDecision(institution, 'loanAccept', request.money, request.description, request.id)}>Aceitar proposta</button><button className="danger" disabled={!connected} onClick={() => institution && onDecision(institution, 'loanDecline', emptyMoney, request.description, request.id)}>Recusar</button></div></>}{request.status === 'accepted' && <span className="status-pill">Aprovado</span>}{request.status === 'declined' && <span className="status-pill offline">Recusado</span>}</article>
+    const kind = request.type === 'loan' ? 'Empréstimo' : request.type === 'convert' ? 'Conversão' : request.type === 'deposit' ? 'Depósito' : request.type === 'withdraw' ? 'Retirada' : request.type === 'charge' ? 'Cobrança' : 'Pedido'
+    return <article className="request-card" key={request.id}><small>{access.storyName} · {institution.name} · {kind}</small><strong>{kind} de {formatCoins(request.money)}</strong><p>{request.description}</p>{request.status === 'pending-master' && <span className="status-pill offline">Aguardando o mestre</span>}{request.status === 'pending-player' && request.type === 'loan' && loan && <><div className="loan-terms"><span>Juros: <b>{loan.interestPercent}%</b></span><span>Parcelas: <b>{loan.installments}× de {formatMoney(loan.installmentPence)}</b></span><span>Total a devolver: <b>{formatMoney(loan.remainingPence)}</b></span></div><div className="request-actions"><button className="primary" disabled={!connected} onClick={() => onDecision(institution, 'loanAccept', request.money, request.description, request.id)}>Aceitar e receber</button><button className="danger" disabled={!connected} onClick={() => onDecision(institution, 'loanDecline', emptyMoney, request.description, request.id)}>Recusar</button></div></>}{request.status === 'pending-player' && request.type === 'charge' && <div className="request-actions"><button className="primary" disabled={!connected || !loan} onClick={() => loan && onDecision(institution, 'loanPay', request.money, request.description, loan.id)}>Pagar cobrança</button></div>}{request.status === 'accepted' && <span className="status-pill">Aprovado</span>}{request.status === 'declined' && <span className="status-pill offline">Recusado</span>}</article>
   })}</section>
 }
 
