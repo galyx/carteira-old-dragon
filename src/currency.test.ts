@@ -38,4 +38,14 @@ describe('moedas', () => {
       { crowns: 1, shillings: 300, pence: 0 },
     )).toMatchObject({ remaining: { crowns: 7, shillings: 100, pence: 0 }, exchanged: false })
   })
+  it('quebra Coroa em Xelins quando o gasto não tem Xelins suficientes no bolso', () => {
+    const payment = payWithChange(
+      { crowns: 8, shillings: 0, pence: 6 },
+      { crowns: 0, shillings: 2, pence: 0 },
+    )
+    expect(payment).not.toBeNull()
+    expect(payment?.exchanged).toBe(true)
+    expect(payment?.remaining).toEqual({ crowns: 7, shillings: 18, pence: 6 })
+    expect(toPence(payment!.remaining)).toBe(toPence({ crowns: 8, shillings: 0, pence: 6 }) - 24)
+  })
 })

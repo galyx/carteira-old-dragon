@@ -31,6 +31,10 @@ jobs:
       - name: Instalar dependências
         run: npm ci
       - name: Gerar aplicativo
+        env:
+          # Chave publishable/anon (pública no cliente). Secrets opcionais sobrescrevem se existirem.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || 'https://wzhsuwmfbuzzhaumuewm.supabase.co' }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || 'sb_publishable_DcUs24GLSGUHWbqyZ1LC-A_3-WXXoM7' }}
         run: npm run build -- --base "${{ steps.pages.outputs.base_path }}/"
       - name: Enviar arquivos do site
         uses: actions/upload-pages-artifact@v3

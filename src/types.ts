@@ -63,7 +63,7 @@ export type MasterRequest = {
   id: string
   characterId: string
   institutionId: string
-  type: 'deposit' | 'withdraw' | 'loan' | 'charge'
+  type: 'deposit' | 'withdraw' | 'loan' | 'charge' | 'convert'
   money: CurrencyInput
   description: string
   dueDate?: string
@@ -108,6 +108,10 @@ export type Story = {
   members: SessionMember[]
   loans: Loan[]
   requests: MasterRequest[]
+  /** Id da mesa no Supabase, quando a História está online. */
+  cloudMesaId?: string
+  /** Chave local do mestre para escrever na mesa online. */
+  masterKey?: string
   createdAt: string
   updatedAt: string
 }
@@ -133,5 +137,8 @@ export type PlayerStoryAccess = {
   sharedCharacters: SharedCharacter[]
   requests?: MasterRequest[]
   loans?: Loan[]
+  cloudMesaId?: string
+  /** Personagem vinculado à mesa — não sai, só apaga e cria de novo. */
+  locked?: boolean
   updatedAt: string
 }

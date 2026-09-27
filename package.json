@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "@vitejs/plugin-react": "^4.4.1",
     "html5-qrcode": "^2.3.8",
     "qrcode": "^1.5.4",

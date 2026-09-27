@@ -1,8 +1,8 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { addCoinBalances, coinBalanceOf, formatCoins, fromPence, payWithChange, toPence } from './currency'
+import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { MasterCloudSession, PlayerCloudSession } from './CloudSession'
+import { postMessage, type InstitutionOperation, type InstitutionOperationResult } from './cloud'
+import { addCoinBalances, bankConversionDelta, coinBalanceOf, formatCoins, fromPence, payWithChange, toPence } from './currency'
 import { db } from './database'
-import { TavernPanel } from './tavern'
-import type { InstitutionOperation, InstitutionOperationResult } from './tavern'
 import type { Character, CurrencyInput, LedgerEntry, PlayerStoryAccess, Story, StoryCharacter, StoryInstitution, Transaction } from './types'
 
 const uid = () => crypto.randomUUID?.() ?? Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16)).join('-')
@@ -24,6 +24,14 @@ export default function RedesignApp() {
   const selectedCharacter = characters.find((item) => item.id === selectedCharacterId) ?? null
   const selectedStory = stories.find((item) => item.id === selectedStoryId) ?? null
   async function addCharacter(name: string) { const value = name.trim(); if (!value) return; const item = { id: uid(), name: value, createdAt: new Date().toISOString() }; await db.saveCharacter(item); setCharacters((current) => [...current, item]); setSelectedCharacterId(item.id) }
+  async function deleteCharacter(id: string) {
+    if (!window.confirm('Apagar este personagem e todo o histórico local? Se ele estiver em uma mesa, precisará entrar de novo com outro personagem.')) return
+    await db.deleteCharacterAndTransactions(id)
+    setCharacters((current) => current.filter((item) => item.id !== id))
+    setTransactions((current) => current.filter((item) => item.characterId !== id))
+    setPlayerStories((current) => current.filter((item) => item.characterId !== id))
+    if (selectedCharacterId === id) setSelectedCharacterId(null)
+  }
   async function saveTransaction(item: Transaction) { await db.saveTransaction(item); setTransactions((current) => current.some((saved) => saved.id === item.id) ? current.map((saved) => saved.id === item.id ? item : saved) : [...current, item]) }
   async function saveStory(story: Story) { const next = { ...story, updatedAt: new Date().toISOString() }; await db.saveStory(next); setStories((current) => current.some((item) => item.id === next.id) ? current.map((item) => item.id === next.id ? next : item) : [...current, next]) }
   async function savePlayerStory(access: PlayerStoryAccess) { await db.savePlayerStory(access); setPlayerStories((current) => current.some((item) => item.id === access.id) ? current.map((item) => item.id === access.id ? access : item) : [...current, access]) }
@@ -31,10 +39,10 @@ export default function RedesignApp() {
 
   if (loading) return <main className="loading">Abrindo o livro-caixa…</main>
   return <main className="app-shell redesigned">
-    <header className="topbar"><button className="brand-button" onClick={() => { setRole('home'); setSelectedStoryId(null) }}><img src={`${import.meta.env.BASE_URL}dragon-mark.svg`} alt="" /><span><small>Livro-caixa</small>Carteira do Dragão</span></button><span className="offline-badge">● Local</span></header>
+    <header className="topbar"><button className="brand-button" onClick={() => { setRole('home'); setSelectedStoryId(null) }}><img src={`${import.meta.env.BASE_URL}dragon-mark.svg`} alt="" /><span><small>Livro-caixa</small>Carteira do Dragão</span></button><span className="offline-badge">● Online</span></header>
     {toast && <div className="toast" role="status">{toast}<button onClick={() => setToast('')}>×</button></div>}
     {role === 'home' && <Home onPlayer={() => setRole('player')} onMaster={() => setRole('master')} />}
-    {role === 'player' && !selectedCharacter && <CharacterLibrary characters={characters} onAdd={addCharacter} onOpen={(id) => setSelectedCharacterId(id)} onBack={() => setRole('home')} />}
+    {role === 'player' && !selectedCharacter && <CharacterLibrary characters={characters} onAdd={addCharacter} onDelete={deleteCharacter} onOpen={(id) => setSelectedCharacterId(id)} onBack={() => setRole('home')} />}
     {role === 'player' && selectedCharacter && <PlayerDashboard character={selectedCharacter} allCharacters={characters} transactions={transactions.filter((item) => item.characterId === selectedCharacter.id)} storyAccess={playerStories.filter((item) => item.characterId === selectedCharacter.id)} onAccess={savePlayerStory} onSelect={setSelectedCharacterId} onSave={saveTransaction} onBack={() => setSelectedCharacterId(null)} />}
     {role === 'master' && !selectedStory && <StoryLibrary stories={stories} onCreate={createStory} onOpen={setSelectedStoryId} onSave={saveStory} onBack={() => setRole('home')} />}
     {role === 'master' && selectedStory && <StoryDashboard story={selectedStory} onSave={saveStory} onBack={() => setSelectedStoryId(null)} onToast={setToast} />}
@@ -42,12 +50,12 @@ export default function RedesignApp() {
 }
 
 function Home({ onPlayer, onMaster }: { onPlayer: () => void; onMaster: () => void }) {
-  return <section className="home-screen"><div className="welcome"><p className="eyebrow">Seu ouro, sua aventura</p><h1>Como você vai jogar hoje?</h1><p>Escolha um caminho. Tudo permanece salvo somente neste aparelho.</p></div><div className="role-grid"><button className="role-card player" onClick={onPlayer}><span className="role-icon">♙</span><div><strong>Entrar como Jogador</strong><small>Gerencie personagens, moedas e Histórias.</small></div><b>→</b></button><button className="role-card master" onClick={onMaster}><span className="role-icon">♜</span><div><strong>Entrar como Mestre</strong><small>Crie Histórias, instituições e sessões.</small></div><b>→</b></button></div><div className="privacy-note"><span>◇</span><div><strong>Sem conta e sem servidor</strong><small>Seus dados vivem neste dispositivo. Use backups regularmente.</small></div></div></section>
+  return <section className="home-screen"><div className="welcome"><p className="eyebrow">Seu ouro, sua aventura</p><h1>Como você vai jogar hoje?</h1><p>Escolha um caminho. A carteira fica no aparelho; a mesa do mestre pode ser compartilhada online.</p></div><div className="role-grid"><button className="role-card player" onClick={onPlayer}><span className="role-icon">♙</span><div><strong>Entrar como Jogador</strong><small>Gerencie personagens, moedas e Histórias.</small></div><b>→</b></button><button className="role-card master" onClick={onMaster}><span className="role-icon">♜</span><div><strong>Entrar como Mestre</strong><small>Crie Histórias, instituições e sessões.</small></div><b>→</b></button></div><div className="privacy-note"><span>◇</span><div><strong>Mesa por código</strong><small>O mestre gera um código de 9 caracteres (válido por 12h). Quem entra fica vinculado ao personagem.</small></div></div></section>
 }
 
-function CharacterLibrary({ characters, onAdd, onOpen, onBack }: { characters: Character[]; onAdd: (name: string) => Promise<void>; onOpen: (id: string) => void; onBack: () => void }) {
+function CharacterLibrary({ characters, onAdd, onDelete, onOpen, onBack }: { characters: Character[]; onAdd: (name: string) => Promise<void>; onDelete: (id: string) => Promise<void>; onOpen: (id: string) => void; onBack: () => void }) {
   const [name, setName] = useState('')
-  return <Page title="Meus personagens" subtitle="Escolha quem entrará na aventura." onBack={onBack}><div className="card-grid">{characters.map((character) => <button className="entity-card" onClick={() => onOpen(character.id)} key={character.id}><span className="avatar">{character.name[0]?.toUpperCase()}</span><div><strong>{character.name}</strong><small>Carteira local</small></div><b>→</b></button>)}</div><EmptyOrCreate empty={!characters.length} title="Crie seu primeiro personagem" description="A carteira e o histórico dele ficarão somente neste aparelho."><form className="inline-create" onSubmit={async (event) => { event.preventDefault(); await onAdd(name); setName('') }}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nome do personagem" /><button className="primary">Criar personagem</button></form></EmptyOrCreate></Page>
+  return <Page title="Meus personagens" subtitle="Escolha quem entrará na aventura." onBack={onBack}><div className="card-grid">{characters.map((character) => <div className="entity-card character-row" key={character.id}><button className="entity-main" onClick={() => onOpen(character.id)}><span className="avatar">{character.name[0]?.toUpperCase()}</span><div><strong>{character.name}</strong><small>Carteira local</small></div><b>→</b></button><button className="danger" type="button" onClick={() => void onDelete(character.id)}>Apagar</button></div>)}</div><EmptyOrCreate empty={!characters.length} title="Crie seu primeiro personagem" description="A carteira fica neste aparelho. Na mesa online, o mestre também acompanha o histórico."><form className="inline-create" onSubmit={async (event) => { event.preventDefault(); await onAdd(name); setName('') }}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nome do personagem" /><button className="primary">Criar personagem</button></form></EmptyOrCreate></Page>
 }
 
 function PlayerDashboard({ character, allCharacters, transactions, storyAccess, onAccess, onSelect, onSave, onBack }: { character: Character; allCharacters: Character[]; transactions: Transaction[]; storyAccess: PlayerStoryAccess[]; onAccess: (access: PlayerStoryAccess) => Promise<void>; onSelect: (id: string) => void; onSave: (item: Transaction) => Promise<void>; onBack: () => void }) {
@@ -63,30 +71,40 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
   useEffect(() => { if (tab === 'institutions') accessRefresh?.() }, [tab, accessRefresh])
 
   function sendOperation(institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string): string | null {
-    if (!operationSender) return 'Conecte este personagem à sessão do mestre antes de movimentar moedas.'
+    if (!operationSender) return 'Entre na mesa do mestre com o código antes de movimentar moedas.'
     if (action !== 'loanDecline' && !toPence(money)) return 'Informe ao menos uma moeda.'
     if (action === 'deposit' && !payWithChange(balance, money)) return 'A carteira não possui valor suficiente para este depósito.'
-    const defaultDescription = action === 'deposit' ? 'Depósito direto' : action === 'withdraw' ? 'Retirada direta' : action === 'loan' ? 'Pedido de empréstimo' : action === 'loanAccept' ? 'Empréstimo aceito' : 'Empréstimo recusado'
+    if (action === 'convert' && !bankConversionDelta(balance, money)) return 'Informe só Coroas ou só Xelins para converter, com quantidade disponível na carteira.'
+    const defaultDescription = action === 'deposit' ? 'Depósito direto' : action === 'withdraw' ? 'Retirada direta' : action === 'loan' ? 'Pedido de empréstimo' : action === 'loanAccept' ? 'Empréstimo aceito' : action === 'convert' ? 'Pedido de conversão ao banco' : 'Empréstimo recusado'
     const operation: InstitutionOperation = { type: 'institution-operation', id: uid(), characterId: character.id, institutionId: institution.id, institutionName: institution.name, action, description: description.trim() || defaultDescription, money, requestId }
-    return operationSender(operation) ? null : 'A conexão caiu. Reconecte pela aba Sessão.'
+    return operationSender(operation) ? null : 'Não foi possível enviar. Verifique a conexão com a mesa.'
   }
 
   async function receiveOperation(result: InstitutionOperationResult) {
     setOperationNotice(result.message)
     if (!result.ok || transactions.some((item) => item.referenceId === result.operation.id)) return
     const operation = result.operation
+    if (operation.action === 'convert') {
+      if (result.applyWallet !== true) return
+      const delta = bankConversionDelta(coinBalanceOf(transactions), operation.money)
+      if (!delta) return
+      await onSave({ id: uid(), characterId: character.id, type: 'income', description: `Conversão aprovada — ${operation.institutionName}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: operation.id, balanceDelta: delta, createdAt: new Date().toISOString() })
+      return
+    }
     if (!['deposit', 'withdraw', 'loanAccept'].includes(operation.action)) return
     const payment = operation.action === 'deposit' ? payWithChange(coinBalanceOf(transactions), operation.money) : null
     if (operation.action === 'deposit' && !payment) return
     await onSave({ id: uid(), characterId: character.id, type: operation.action === 'deposit' ? 'expense' : 'income', description: operation.action === 'deposit' ? `Depósito em ${operation.institutionName}` : operation.action === 'withdraw' ? `Retirada de ${operation.institutionName}` : `Empréstimo de ${operation.institutionName}`, date: today(), ...operation.money, totalPence: toPence(operation.money), referenceId: operation.id, balanceDelta: payment?.balanceDelta, createdAt: new Date().toISOString() })
   }
 
+  const primaryAccess = storyAccess[0] ?? null
+
   return <>
-    <Page title={character.name} subtitle="Personagem local" onBack={onBack} trailing={<select value={character.id} onChange={(event) => onSelect(event.target.value)}>{allCharacters.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}>
-      <div className={equivalent < 0 ? 'hero-balance negative' : 'hero-balance'}><span>Moedas na carteira</span><strong>{formatCoins(balance)}</strong><small>Sem conversão automática · valor equivalente: {equivalent} Pences</small></div>
-      {tab === 'wallet' && <PlayerWallet character={character} onSave={onSave} />}
+    <Page title={character.name} subtitle="Personagem" onBack={onBack} trailing={<select value={character.id} onChange={(event) => onSelect(event.target.value)}>{allCharacters.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}>
+      <div className={equivalent < 0 ? 'hero-balance negative' : 'hero-balance'}><span>Moedas na carteira</span><strong>{formatCoins(balance)}</strong><small>Gasto no bolso quebra Coroa automaticamente · equivalente: {equivalent} Pences</small></div>
+      {tab === 'wallet' && <PlayerWallet character={character} balance={balance} onSave={onSave} />}
       {tab === 'institutions' && <PlayerInstitutions accesses={storyAccess} connected={Boolean(operationSender)} notice={operationNotice} onRefresh={() => accessRefresh?.() ?? false} onOperate={sendOperation} />}
-      <section className="surface connection-keeper" hidden={tab !== 'session'}><div className="section-title"><div><p className="eyebrow">Conexão com o mestre</p><h3>{storyAccess.length ? 'Atualizar sessão' : 'Entrar em uma sessão'}</h3></div></div><p>Leia o QR mostrado pelo mestre para conectar este personagem e receber permissões atualizadas.</p><TavernPanel character={character} transactions={transactions} onSave={onSave} allowHost={false} onAccessReceived={onAccess} onOperationResult={(result) => void receiveOperation(result)} onOperationSender={registerOperationSender} onAccessRefreshSender={registerAccessRefresh} /></section>
+      <section className="surface connection-keeper" hidden={tab !== 'session'}><PlayerCloudSession character={character} transactions={transactions} access={primaryAccess} onAccess={onAccess} onOperationResult={(result) => void receiveOperation(result)} onOperationSender={registerOperationSender} onAccessRefreshSender={registerAccessRefresh} /></section>
       {tab === 'requests' && <PlayerRequests accesses={storyAccess} connected={Boolean(operationSender)} onDecision={sendOperation} />}
       {tab === 'history' && <History entries={transactions} />}
     </Page>
@@ -96,37 +114,45 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
 
 function PlayerInstitutions({ accesses, connected, notice, onRefresh, onOperate }: { accesses: PlayerStoryAccess[]; connected: boolean; notice: string; onRefresh: () => boolean; onOperate: (institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string) => string | null }) {
   const institutions = accesses.flatMap((access) => access.institutions.map((institution) => ({ ...institution, storyName: access.storyName })))
-  const [operation, setOperation] = useState<{ institution: typeof institutions[number]; action: 'deposit' | 'withdraw' | 'loan' } | null>(null)
+  const [operation, setOperation] = useState<{ institution: typeof institutions[number]; action: 'deposit' | 'withdraw' | 'loan' | 'convert' } | null>(null)
   const [money, setMoney] = useState<CurrencyInput>(emptyMoney)
   const [description, setDescription] = useState('')
   const [feedback, setFeedback] = useState('')
 
-  function start(institution: typeof institutions[number], action: 'deposit' | 'withdraw' | 'loan') { setOperation({ institution, action }); setMoney(emptyMoney); setDescription(''); setFeedback('') }
+  function start(institution: typeof institutions[number], action: 'deposit' | 'withdraw' | 'loan' | 'convert') { setOperation({ institution, action }); setMoney(emptyMoney); setDescription(''); setFeedback('') }
   function submit(event: FormEvent) { event.preventDefault(); if (!operation) return; const error = onOperate(operation.institution, operation.action, money, description); if (error) { setFeedback(error); return }; setFeedback('Operação enviada para a instituição.'); setTimeout(() => setOperation(null), 700) }
+  const title = !operation ? '' : operation.action === 'deposit' ? `Depositar em ${operation.institution.name}` : operation.action === 'withdraw' ? `Retirar de ${operation.institution.name}` : operation.action === 'convert' ? `Converter em ${operation.institution.name}` : `Pedir empréstimo a ${operation.institution.name}`
+  const helper = !operation ? '' : operation.action === 'deposit' ? 'As moedas sairão da carteira do personagem e entrarão na instituição.' : operation.action === 'withdraw' ? 'As moedas sairão da instituição e entrarão na carteira do personagem.' : operation.action === 'convert' ? 'Informe só Coroas (viram Xelins) ou só Xelins (viram Pences). O mestre precisa aprovar no banco.' : 'Informe quanto deseja pedir. O mestre definirá juros, parcelas e decidirá se aprova.'
 
   return <section>
-    <div className="section-title"><div><p className="eyebrow">Acesso durante a sessão</p><h3>Instituições</h3></div><div className="sync-actions"><span className={connected ? 'status-pill' : 'status-pill offline'}>{connected ? '● Conectado' : '○ Reconecte'}</span><button type="button" onClick={onRefresh} disabled={!connected}>↻ Atualizar</button></div></div>
+    <div className="section-title"><div><p className="eyebrow">Acesso na mesa</p><h3>Instituições</h3></div><div className="sync-actions"><span className={connected ? 'status-pill' : 'status-pill offline'}>{connected ? '● Na mesa' : '○ Fora da mesa'}</span><button type="button" onClick={onRefresh} disabled={!connected}>↻ Atualizar</button></div></div>
     {notice && <p className="operation-notice" role="status">{notice}</p>}
-    {!institutions.length && <EmptyState icon="♜" title="Nenhuma instituição liberada" text="Peça ao mestre para conceder acesso e atualizar a sessão." />}
+    {!institutions.length && <EmptyState icon="♜" title="Nenhuma instituição na mesa" text="Quando o mestre criar organizações, elas aparecem aqui após atualizar." />}
     {institutions.map((institution) => <article className="player-institution" key={`${institution.storyName}:${institution.id}`}>
       <div className="institution-access-head"><div className="permission-title"><span className="avatar institution">{institution.kind[0]}</span><div><small>{institution.kind} · {institution.storyName}</small><strong>{institution.name}</strong></div></div><b>{formatCoins(institution.balance ?? fromPence(institution.balancePence))}</b></div>
-      <div className="permission-tags actions">{institution.permissions.includes('deposit') && <span>Solicitar depósito</span>}{institution.permissions.includes('depositDirect') && <button type="button" className="direct" onClick={() => start(institution, 'deposit')}>Depositar direto</button>}{institution.permissions.includes('withdraw') && <span>Solicitar retirada</span>}{institution.permissions.includes('withdrawDirect') && <button type="button" className="direct" onClick={() => start(institution, 'withdraw')}>Retirar direto</button>}{institution.permissions.includes('loan') && <button type="button" onClick={() => start(institution, 'loan')}>Pedir empréstimo</button>}</div>
-      {institution.permissions.includes('view') && <details className="institution-history"><summary>Ver histórico <span>{institution.ledger.length}</span></summary><div className="mini-history">{!institution.ledger.length && <p className="helper">Nenhuma movimentação compartilhada.</p>}{institution.ledger.slice(-8).reverse().map((entry) => <div key={entry.id}><span>{ledgerEntryLabel(entry)}</span><b>{entry.type === 'income' ? '+' : '−'}{formatCoins(entry)}</b></div>)}</div></details>}
+      <div className="permission-tags actions">{institution.permissions.includes('deposit') && <span>Solicitar depósito</span>}{institution.permissions.includes('depositDirect') && <button type="button" className="direct" onClick={() => start(institution, 'deposit')}>Depositar direto</button>}{institution.permissions.includes('withdraw') && <span>Solicitar retirada</span>}{institution.permissions.includes('withdrawDirect') && <button type="button" className="direct" onClick={() => start(institution, 'withdraw')}>Retirar direto</button>}{institution.permissions.includes('loan') && <button type="button" onClick={() => start(institution, 'loan')}>Pedir empréstimo</button>}{connected && <button type="button" onClick={() => start(institution, 'convert')}>Pedir conversão</button>}</div>
+      {(institution.permissions.includes('view') || institution.ledger.length > 0) && <details className="institution-history"><summary>Ver histórico <span>{institution.ledger.length}</span></summary><div className="mini-history">{!institution.ledger.length && <p className="helper">Nenhuma movimentação compartilhada.</p>}{institution.ledger.slice(-8).reverse().map((entry) => <div key={entry.id}><span>{ledgerEntryLabel(entry)}</span><b>{entry.type === 'income' ? '+' : '−'}{formatCoins(entry)}</b></div>)}</div></details>}
     </article>)}
-    {operation && <Modal title={`${operation.action === 'deposit' ? 'Depositar em' : operation.action === 'withdraw' ? 'Retirar de' : 'Pedir empréstimo a'} ${operation.institution.name}`} onClose={() => setOperation(null)}><form className="clean-form" onSubmit={submit}><p className="helper">{operation.action === 'deposit' ? 'As moedas sairão da carteira do personagem e entrarão na instituição.' : operation.action === 'withdraw' ? 'As moedas sairão da instituição e entrarão na carteira do personagem.' : 'Informe quanto deseja pedir. O mestre definirá juros, parcelas e decidirá se aprova.'}</p><label>Descrição<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder={operation.action === 'loan' ? 'Motivo do empréstimo' : 'Motivo da movimentação'} /></label><MoneyFields money={money} setMoney={setMoney} />{feedback && <p className={feedback.startsWith('Operação') ? 'success' : 'error'}>{feedback}</p>}<button className="primary wide">{operation.action === 'loan' ? 'Enviar pedido ao mestre' : `Confirmar ${operation.action === 'deposit' ? 'depósito' : 'retirada'}`}</button></form></Modal>}
+    {operation && <Modal title={title} onClose={() => setOperation(null)}><form className="clean-form" onSubmit={submit}><p className="helper">{helper}</p><label>Descrição<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder={operation.action === 'loan' ? 'Motivo do empréstimo' : operation.action === 'convert' ? 'Ex.: Quebrar 1 Coroa em Xelins' : 'Motivo da movimentação'} /></label><MoneyFields money={money} setMoney={setMoney} />{feedback && <p className={feedback.startsWith('Operação') ? 'success' : 'error'}>{feedback}</p>}<button className="primary wide">{operation.action === 'loan' || operation.action === 'convert' ? 'Enviar pedido ao mestre' : `Confirmar ${operation.action === 'deposit' ? 'depósito' : 'retirada'}`}</button></form></Modal>}
   </section>
 }
 
-function PlayerStories({ character, accesses, transactions, onSave, onAccess }: { character: Character; accesses: PlayerStoryAccess[]; transactions: Transaction[]; onSave: (item: Transaction) => Promise<void>; onAccess: (access: PlayerStoryAccess) => Promise<void> }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null); const selected = accesses.find((item) => item.id === selectedId)
-  if (selected) return <section><button className="sub-back" onClick={() => setSelectedId(null)}>← {selected.storyName}</button><div className="section-title"><div><p className="eyebrow">Instituições liberadas</p><h3>{selected.storyName}</h3></div></div>{!selected.institutions.length && <EmptyState icon="♜" title="Nenhuma instituição liberada" text="O mestre ainda não concedeu acesso a instituições." />}{selected.institutions.map((institution) => <article className="player-institution" key={institution.id}><div className="permission-title"><span className="avatar institution">{institution.kind[0]}</span><div><small>{institution.kind}</small><strong>{institution.name}</strong></div></div><b>{formatCoins(institution.balance ?? fromPence(institution.balancePence))}</b><div className="permission-tags">{institution.permissions.includes('view') && <span>Ver histórico</span>}{institution.permissions.includes('deposit') && <span>Solicitar depósito</span>}{institution.permissions.includes('depositDirect') && <span className="direct">Depositar direto</span>}{institution.permissions.includes('withdraw') && <span>Solicitar retirada</span>}{institution.permissions.includes('withdrawDirect') && <span className="direct">Retirar direto</span>}{institution.permissions.includes('loan') && <span>Pedir empréstimo</span>}</div>{institution.permissions.includes('view') && <div className="mini-history">{institution.ledger.slice(-3).reverse().map((entry) => <div key={entry.id}><span>{entry.description}</span><b>{entry.type === 'income' ? '+' : '−'}{formatCoins(entry)}</b></div>)}</div>}</article>)}</section>
-  return <section><div className="section-title"><div><p className="eyebrow">Vínculos do personagem</p><h3>Minhas Histórias</h3></div></div>{accesses.map((access) => <button className="story-access-card" onClick={() => setSelectedId(access.id)} key={access.id}><span className="story-seal">✦</span><div><strong>{access.storyName}</strong><small>{access.institutions.length} instituições liberadas</small></div><b>→</b></button>)}<section className="surface"><h3>{accesses.length ? 'Conectar novamente' : 'Entrar em uma História'}</h3><p>Leia o QR mostrado pelo mestre para receber ou atualizar suas permissões.</p><TavernPanel character={character} transactions={transactions} onSave={onSave} allowHost={false} onAccessReceived={onAccess} /></section></section>
-}
-
-function PlayerWallet({ character, onSave }: { character: Character; onSave: (item: Transaction) => Promise<void> }) {
-  const [type, setType] = useState<'income' | 'expense'>('expense'); const [description, setDescription] = useState(''); const [money, setMoney] = useState(emptyMoney)
-  async function submit(event: FormEvent) { event.preventDefault(); const totalPence = toPence(money); if (!totalPence) return; await onSave({ id: uid(), characterId: character.id, type, description: description.trim() || (type === 'income' ? 'Ganho' : 'Gasto'), date: today(), ...money, totalPence, createdAt: new Date().toISOString() }); setMoney(emptyMoney); setDescription('') }
-  return <section className="surface"><div className="section-title"><div><p className="eyebrow">Movimentação</p><h3>Novo lançamento</h3></div><div className="segmented"><button className={type === 'expense' ? 'active' : ''} onClick={() => setType('expense')}>Gasto</button><button className={type === 'income' ? 'active' : ''} onClick={() => setType('income')}>Ganho</button></div></div><form className="clean-form" onSubmit={submit}><label>Descrição<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Ex.: Estalagem" /></label><MoneyFields money={money} setMoney={setMoney} /><button className="primary wide">Registrar {type === 'income' ? 'ganho' : 'gasto'}</button></form></section>
+function PlayerWallet({ character, balance, onSave }: { character: Character; balance: CurrencyInput; onSave: (item: Transaction) => Promise<void> }) {
+  const [type, setType] = useState<'income' | 'expense'>('expense'); const [description, setDescription] = useState(''); const [money, setMoney] = useState(emptyMoney); const [error, setError] = useState('')
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    const totalPence = toPence(money)
+    if (!totalPence) { setError('Informe ao menos uma moeda.'); return }
+    if (type === 'expense') {
+      const payment = payWithChange(balance, money)
+      if (!payment) { setError('Moedas insuficientes na carteira.'); return }
+      await onSave({ id: uid(), characterId: character.id, type, description: description.trim() || 'Gasto', date: today(), ...money, totalPence, balanceDelta: payment.balanceDelta, createdAt: new Date().toISOString() })
+    } else {
+      await onSave({ id: uid(), characterId: character.id, type, description: description.trim() || 'Ganho', date: today(), ...money, totalPence, createdAt: new Date().toISOString() })
+    }
+    setMoney(emptyMoney); setDescription(''); setError('')
+  }
+  return <section className="surface"><div className="section-title"><div><p className="eyebrow">Movimentação</p><h3>Novo lançamento</h3></div><div className="segmented"><button className={type === 'expense' ? 'active' : ''} onClick={() => setType('expense')}>Gasto</button><button className={type === 'income' ? 'active' : ''} onClick={() => setType('income')}>Ganho</button></div></div><form className="clean-form" onSubmit={(event) => void submit(event)}><label>Descrição<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Ex.: Estalagem" /></label><MoneyFields money={money} setMoney={setMoney} />{error && <p className="error">{error}</p>}<button className="primary wide">Registrar {type === 'income' ? 'ganho' : 'gasto'}</button></form></section>
 }
 
 function StoryLibrary({ stories, onCreate, onOpen, onSave, onBack }: { stories: Story[]; onCreate: (name: string, description: string) => Promise<void>; onOpen: (id: string) => void; onSave: (story: Story) => Promise<void>; onBack: () => void }) {
@@ -138,34 +164,78 @@ function StoryLibrary({ stories, onCreate, onOpen, onSave, onBack }: { stories: 
 function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSave: (story: Story) => Promise<void>; onBack: () => void; onToast: (text: string) => void }) {
   const [tab, setTab] = useState<'overview' | 'institutions' | 'characters' | 'players' | 'loans' | 'session'>('overview')
   const total = addCoinBalances(story.institutions.map((item) => coinBalanceOf(item.ledger)))
-  const accessFor = (characterId: string, source = story): PlayerStoryAccess | null => { const member = source.members.find((item) => item.characterId === characterId); if (!member) return null; return { id: `${source.id}:${characterId}`, storyId: source.id, storyName: source.name, characterId, institutions: source.institutions.filter((institution) => (member.permissions[institution.id] ?? []).length > 0).map((institution) => ({ id: institution.id, name: institution.name, kind: institution.kind, balancePence: ledgerBalance(institution.ledger), balance: coinBalanceOf(institution.ledger), ledger: (member.permissions[institution.id] ?? []).includes('view') ? institution.ledger : [], permissions: member.permissions[institution.id] ?? [], withdrawLimitPence: member.withdrawLimits[institution.id] })), sharedCharacters: source.characters.filter((item) => (member.sharedCharacterIds ?? []).includes(item.id)), requests: source.requests.filter((item) => item.characterId === characterId), loans: source.loans.filter((item) => item.characterId === characterId), updatedAt: new Date().toISOString() } }
+  const accessFor = (characterId: string, source = story): PlayerStoryAccess | null => {
+    const member = source.members.find((item) => item.characterId === characterId)
+    if (!member) return null
+    const permitted = source.institutions.filter((institution) => (member.permissions[institution.id] ?? []).length > 0)
+    const visibleInstitutions = permitted.length ? permitted : source.institutions
+    return {
+      id: `${source.id}:${characterId}`,
+      storyId: source.id,
+      storyName: source.name,
+      characterId,
+      cloudMesaId: source.cloudMesaId,
+      locked: Boolean(source.cloudMesaId),
+      institutions: visibleInstitutions.map((institution) => ({
+        id: institution.id,
+        name: institution.name,
+        kind: institution.kind,
+        balancePence: ledgerBalance(institution.ledger),
+        balance: coinBalanceOf(institution.ledger),
+        ledger: (member.permissions[institution.id] ?? []).includes('view') || !permitted.length ? institution.ledger : [],
+        permissions: member.permissions[institution.id] ?? [],
+        withdrawLimitPence: member.withdrawLimits[institution.id],
+      })),
+      sharedCharacters: (member.sharedCharacterIds ?? []).length
+        ? source.characters.filter((item) => (member.sharedCharacterIds ?? []).includes(item.id))
+        : source.characters,
+      requests: source.requests.filter((item) => item.characterId === characterId),
+      loans: source.loans.filter((item) => item.characterId === characterId),
+      updatedAt: new Date().toISOString(),
+    }
+  }
 
   async function handleInstitutionOperation(operation: InstitutionOperation): Promise<InstitutionOperationResult> {
-    const member = story.members.find((item) => item.characterId === operation.characterId)
-    const institution = story.institutions.find((item) => item.id === operation.institutionId)
-    if (!member || !institution) return { type: 'institution-operation-result', operation, ok: false, message: 'Jogador ou instituição não reconhecido.' }
+    let current = story
+    let member = current.members.find((item) => item.characterId === operation.characterId)
+    const institution = current.institutions.find((item) => item.id === operation.institutionId)
+    if (!institution) return { type: 'institution-operation-result', operation, ok: false, message: 'Instituição não reconhecida.' }
+    if (!member) {
+      member = { characterId: operation.characterId, name: 'Jogador', permissions: {}, withdrawLimits: {}, sharedCharacterIds: [], connectedAt: new Date().toISOString() }
+      current = { ...current, members: [...current.members, member] }
+      await onSave(current)
+    }
+
+    if (operation.action === 'convert') {
+      if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe o valor a converter.', applyWallet: false }
+      if (current.requests.some((item) => item.id === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido já registrado.', access: accessFor(operation.characterId, current) ?? undefined, applyWallet: false }
+      const request = { id: operation.id, characterId: operation.characterId, institutionId: operation.institutionId, type: 'convert' as const, money: operation.money, description: operation.description, status: 'pending-master' as const, createdAt: new Date().toISOString() }
+      const nextStory = { ...current, requests: [...current.requests, request] }
+      await onSave(nextStory)
+      return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido de conversão enviado ao mestre.', access: accessFor(operation.characterId, nextStory) ?? undefined, applyWallet: false }
+    }
 
     if (operation.action === 'loan') {
       if (!(member.permissions[institution.id] ?? []).includes('loan')) return { type: 'institution-operation-result', operation, ok: false, message: 'O mestre não liberou pedidos de empréstimo nesta instituição.' }
       if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe o valor desejado.' }
-      if (story.requests.some((item) => item.id === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido já enviado.', access: accessFor(operation.characterId) ?? undefined }
+      if (current.requests.some((item) => item.id === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido já enviado.', access: accessFor(operation.characterId, current) ?? undefined }
       const request = { id: operation.id, characterId: operation.characterId, institutionId: operation.institutionId, type: 'loan' as const, money: operation.money, description: operation.description, status: 'pending-master' as const, createdAt: new Date().toISOString() }
-      const nextStory = { ...story, requests: [...story.requests, request] }
+      const nextStory = { ...current, requests: [...current.requests, request] }
       await onSave(nextStory)
       return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido de empréstimo enviado ao mestre.', access: accessFor(operation.characterId, nextStory) ?? undefined }
     }
 
     if (operation.action === 'loanAccept' || operation.action === 'loanDecline') {
-      const request = story.requests.find((item) => item.id === operation.requestId && item.characterId === operation.characterId && item.status === 'pending-player')
-      const loan = story.loans.find((item) => item.id === operation.requestId && item.status === 'pending')
+      const request = current.requests.find((item) => item.id === operation.requestId && item.characterId === operation.characterId && item.status === 'pending-player')
+      const loan = current.loans.find((item) => item.id === operation.requestId && item.status === 'pending')
       if (!request || !loan) return { type: 'institution-operation-result', operation, ok: false, message: 'Esta proposta não está mais disponível.' }
-      if (operation.action === 'loanDecline') { const nextStory = { ...story, requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'declined' as const } : item), loans: story.loans.map((item) => item.id === loan.id ? { ...item, status: 'declined' as const } : item) }; await onSave(nextStory); return { type: 'institution-operation-result', operation, ok: true, message: 'Proposta de empréstimo recusada.', access: accessFor(operation.characterId, nextStory) ?? undefined } }
+      if (operation.action === 'loanDecline') { const nextStory = { ...current, requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'declined' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'declined' as const } : item) }; await onSave(nextStory); return { type: 'institution-operation-result', operation, ok: true, message: 'Proposta de empréstimo recusada.', access: accessFor(operation.characterId, nextStory) ?? undefined } }
       const payment = payWithChange(coinBalanceOf(institution.ledger), request.money)
       if (!payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui mais moedas suficientes para liberar o empréstimo.' }
       const authoritativeOperation = { ...operation, money: request.money, description: request.description }
       const entry: LedgerEntry = { id: uid(), type: 'expense', description: `Empréstimo concedido a ${member.name}`, date: today(), ...request.money, totalPence: toPence(request.money), referenceId: request.id, balanceDelta: payment.balanceDelta, createdAt: new Date().toISOString() }
       const nextInstitution = { ...institution, ledger: [...institution.ledger, entry] }
-      const nextStory = { ...story, institutions: story.institutions.map((item) => item.id === institution.id ? nextInstitution : item), requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item), loans: story.loans.map((item) => item.id === loan.id ? { ...item, status: 'active' as const } : item) }
+      const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === institution.id ? nextInstitution : item), requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'active' as const } : item) }
       await onSave(nextStory)
       return { type: 'institution-operation-result', operation: authoritativeOperation, ok: true, message: 'Empréstimo aceito e moedas recebidas.', access: accessFor(operation.characterId, nextStory) ?? undefined }
     }
@@ -173,7 +243,7 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
     const requiredPermission = operation.action === 'deposit' ? 'depositDirect' : 'withdrawDirect'
     if (!(member.permissions[institution.id] ?? []).includes(requiredPermission)) return { type: 'institution-operation-result', operation, ok: false, message: 'O mestre não liberou esta operação direta.' }
     if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe ao menos uma moeda.' }
-    if (institution.ledger.some((entry) => entry.referenceId === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Esta operação já havia sido registrada.', access: accessFor(operation.characterId) ?? undefined }
+    if (institution.ledger.some((entry) => entry.referenceId === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Esta operação já havia sido registrada.', access: accessFor(operation.characterId, current) ?? undefined }
 
     const payment = operation.action === 'withdraw' ? payWithChange(coinBalanceOf(institution.ledger), operation.money) : null
     if (operation.action === 'withdraw' && !payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui moedas suficientes para esta retirada.' }
@@ -182,11 +252,11 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
 
     const entry: LedgerEntry = { id: uid(), type: operation.action === 'deposit' ? 'income' : 'expense', description: `${operation.action === 'deposit' ? `Depósito de ${member.name}` : `Retirada por ${member.name}`}${operation.description ? ` — ${operation.description}` : ''}`, date: today(), ...operation.money, totalPence: toPence(operation.money), referenceId: operation.id, balanceDelta: payment?.balanceDelta, createdAt: new Date().toISOString() }
     const nextInstitution = { ...institution, ledger: [...institution.ledger, entry] }
-    const nextStory = { ...story, institutions: story.institutions.map((item) => item.id === institution.id ? nextInstitution : item) }
+    const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === institution.id ? nextInstitution : item) }
     await onSave(nextStory)
     return { type: 'institution-operation-result', operation, ok: true, message: `${operation.action === 'deposit' ? 'Depósito' : 'Retirada'} concluído com sucesso.`, access: accessFor(operation.characterId, nextStory) ?? undefined }
   }
-  return <><Page title={story.name} subtitle="História" onBack={onBack} trailing={<span className="status-pill">● Salva</span>}><div className="story-tabs">{([['overview','Visão geral'],['institutions','Instituições'],['characters','Personagens'],['players','Jogadores'],['loans','Empréstimos'],['session','Sessão']] as const).map(([key,label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'overview' && <Overview story={story} total={total} onNavigate={setTab} />}{tab === 'institutions' && <Institutions story={story} onSave={onSave} />}{tab === 'characters' && <StoryCharacters story={story} onSave={onSave} />}{tab === 'players' && <Players story={story} onSave={onSave} />}{tab === 'loans' && <Loans story={story} onSave={onSave} onToast={onToast} />}<section className="surface session-surface connection-keeper" hidden={tab !== 'session'}><div className="section-title"><div><p className="eyebrow">Rede local</p><h3>Conectar jogadores</h3></div></div><p>Esta área cuida apenas da conexão. Depois que alguém entrar, use a aba <strong>Jogadores</strong> para liberar personagens e permissões.</p><TavernPanel character={{ id: `master-${story.id}`, name: 'Mestre', createdAt: story.createdAt }} transactions={[]} onSave={async () => undefined} allowHost showWorkspace={false} storyAccessFor={accessFor} onInstitutionOperation={handleInstitutionOperation} onPlayerConnected={async (player) => { if (story.members.some((item) => item.characterId === player.characterId)) return; await onSave({ ...story, members: [...story.members, { characterId: player.characterId, name: player.name, permissions: {}, withdrawLimits: {}, sharedCharacterIds: [], connectedAt: new Date().toISOString() }] }) }} /></section></Page><BottomNav items={[['overview','Resumo','⌂'],['institutions','Instituições','♜'],['players','Jogadores','♙'],['session','Sessão','⌁']]} active={tab} onChange={(value) => setTab(value as typeof tab)} /></>
+  return <><Page title={story.name} subtitle="História" onBack={onBack} trailing={<span className="status-pill">{story.cloudMesaId ? '● Online' : '● Local'}</span>}><div className="story-tabs">{([['overview','Visão geral'],['institutions','Instituições'],['characters','Personagens'],['players','Jogadores'],['loans','Pedidos'],['session','Sessão']] as const).map(([key,label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'overview' && <Overview story={story} total={total} onNavigate={setTab} />}{tab === 'institutions' && <Institutions story={story} onSave={onSave} />}{tab === 'characters' && <StoryCharacters story={story} onSave={onSave} />}{tab === 'players' && <Players story={story} onSave={onSave} />}{tab === 'loans' && <Loans story={story} onSave={onSave} onToast={onToast} />}<section className="surface session-surface connection-keeper" hidden={tab !== 'session'}><MasterCloudSession story={story} onSave={onSave} storyAccessFor={accessFor} onInstitutionOperation={handleInstitutionOperation} onToast={onToast} /></section></Page><BottomNav items={[['overview','Resumo','⌂'],['institutions','Instituições','♜'],['players','Jogadores','♙'],['session','Sessão','⌁']]} active={tab} onChange={(value) => setTab(value as typeof tab)} /></>
 }
 
 function Overview({ story, total, onNavigate }: { story: Story; total: CurrencyInput; onNavigate: (tab: 'institutions' | 'characters' | 'players' | 'loans') => void }) { const pending = story.requests.filter((item) => item.status.includes('pending')).length; return <><div className="metric-grid"><div className="metric gold"><small>Patrimônio institucional</small><strong>{formatCoins(total)}</strong><small>Equivalente a {toPence(total)} Pences</small></div><button className="metric" onClick={() => onNavigate('players')}><small>Jogadores</small><strong>{story.members.length}</strong></button><button className="metric" onClick={() => onNavigate('institutions')}><small>Instituições</small><strong>{story.institutions.length}</strong></button><button className="metric" onClick={() => onNavigate('loans')}><small>Pendências</small><strong>{pending}</strong></button></div><section className="surface"><div className="section-title"><h3>Atividade da História</h3></div><EmptyState icon="◇" title="Tudo tranquilo por aqui" text="Movimentações e solicitações recentes aparecerão neste painel." /></section></> }
@@ -215,17 +285,64 @@ function Players({ story, onSave }: { story: Story; onSave: (story: Story) => Pr
   const [selectedId, setSelectedId] = useState<string | null>(null); const member = story.members.find((item) => item.characterId === selectedId)
   async function updateMember(next: typeof member) { if (!next) return; await onSave({ ...story, members: story.members.map((item) => item.characterId === next.characterId ? next : item) }) }
   if (member) return <section><button className="sub-back" onClick={() => setSelectedId(null)}>← Todos os jogadores</button><div className="member-profile"><span className="avatar large">{member.name[0]}</span><div><p className="eyebrow">Personagem do jogador</p><h2>{member.name}</h2><small>A carteira pessoal permanece privada.</small></div></div><section className="surface"><h3>Personagens liberados</h3><p className="helper">Escolha quais personagens compartilhados este jogador pode visualizar e usar.</p>{!story.characters.length && <EmptyState icon="♙" title="Nenhum personagem compartilhado" text="Crie personagens na aba Personagens antes de liberá-los." />}{story.characters.map((character) => <label className="permission-row" key={character.id}><div><strong>{character.name}</strong><small>Personagem administrado pelo mestre</small></div><input type="checkbox" checked={(member.sharedCharacterIds ?? []).includes(character.id)} onChange={() => { const current = member.sharedCharacterIds ?? []; void updateMember({ ...member, sharedCharacterIds: current.includes(character.id) ? current.filter((id) => id !== character.id) : [...current, character.id] }) }} /></label>)}</section><section className="surface"><h3>Permissões por instituição</h3><p className="helper">“Direto” permite movimentar sem uma aprovação nova do mestre.</p>{!story.institutions.length && <EmptyState icon="♜" title="Nenhuma instituição" text="Crie uma instituição antes de definir permissões." />}{story.institutions.map((institution) => <div className="permission-group" key={institution.id}><div className="permission-title"><span className="avatar institution">{institution.kind[0]}</span><div><strong>{institution.name}</strong><small>{institution.kind}</small></div></div><div className="permission-grid">{([['view','Visualizar saldo e histórico'],['deposit','Solicitar depósito'],['depositDirect','Depositar diretamente'],['withdraw','Solicitar retirada'],['withdrawDirect','Retirar diretamente'],['loan','Solicitar empréstimo']] as const).map(([permission,label]) => <label key={permission}><input type="checkbox" checked={(member.permissions[institution.id] ?? []).includes(permission)} onChange={() => { const current = member.permissions[institution.id] ?? []; const next = current.includes(permission) ? current.filter((item) => item !== permission) : [...current, permission]; void updateMember({ ...member, permissions: { ...member.permissions, [institution.id]: next } }) }} /> {label}</label>)}</div>{((member.permissions[institution.id] ?? []).includes('withdraw') || (member.permissions[institution.id] ?? []).includes('withdrawDirect')) && <label className="limit-field">Limite de retirada em Pences<input type="number" min="0" value={member.withdrawLimits[institution.id] ?? ''} onChange={(event) => void updateMember({ ...member, withdrawLimits: { ...member.withdrawLimits, [institution.id]: Math.max(0, Number(event.target.value) || 0) } })} placeholder="Sem limite" /></label>}</div>)}</section></section>
-  return <section><div className="section-title"><div><p className="eyebrow">Vínculos e acesso</p><h3>Jogadores</h3></div></div>{!story.members.length && <EmptyState icon="♙" title="Nenhum jogador vinculado" text="Abra a sessão e peça para o jogador entrar com o QR desta História." />}{story.members.map((item) => <button className="member-card member-button" onClick={() => setSelectedId(item.characterId)} key={item.characterId}><span className="avatar">{item.name[0]}</span><div><strong>{item.name}</strong><small>Definir personagens e permissões</small></div><span className="status-pill">Vinculado</span><b>→</b></button>)}</section>
+  return <section><div className="section-title"><div><p className="eyebrow">Vínculos e acesso</p><h3>Jogadores</h3></div></div>{!story.members.length && <EmptyState icon="♙" title="Nenhum jogador vinculado" text="Abra a Sessão, gere um código e peça para o jogador entrar com esses 9 caracteres." />}{story.members.map((item) => <button className="member-card member-button" onClick={() => setSelectedId(item.characterId)} key={item.characterId}><span className="avatar">{item.name[0]}</span><div><strong>{item.name}</strong><small>Definir personagens e permissões</small></div><span className="status-pill">Vinculado</span><b>→</b></button>)}</section>
 }
 
 function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story) => Promise<void>; onToast: (text: string) => void }) {
   const [terms, setTerms] = useState<Record<string, { interest: number; installments: number; dueDate: string }>>({})
-  const requests = story.requests.filter((item) => item.type === 'loan')
+  const loanRequests = story.requests.filter((item) => item.type === 'loan')
+  const convertRequests = story.requests.filter((item) => item.type === 'convert')
   const defaults = (id: string) => terms[id] ?? { interest: 10, installments: 3, dueDate: today() }
   const change = (id: string, values: Partial<ReturnType<typeof defaults>>) => setTerms((current) => ({ ...current, [id]: { ...defaults(id), ...values } }))
-  async function approve(request: typeof requests[number]) { const config = defaults(request.id); const principal = toPence(request.money); const total = Math.ceil(principal * (1 + config.interest / 100)); const installments = Math.max(1, config.installments); const loan = { id: request.id, characterId: request.characterId, institutionId: request.institutionId, principalPence: principal, interestPercent: config.interest, installments, installmentPence: Math.ceil(total / installments), remainingPence: total, dueDate: config.dueDate, status: 'pending' as const }; await onSave({ ...story, loans: [...story.loans.filter((item) => item.id !== loan.id), loan], requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'pending-player' as const } : item) }); onToast('Proposta enviada ao jogador.') }
-  async function decline(requestId: string) { await onSave({ ...story, loans: story.loans.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item), requests: story.requests.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item) }); onToast('Pedido de empréstimo recusado.') }
-  return <section><div className="section-title"><div><p className="eyebrow">Crédito e dívidas</p><h3>Empréstimos</h3></div></div>{!requests.length && <EmptyState icon="◈" title="Nenhum pedido de empréstimo" text="Os pedidos feitos pelos jogadores aparecerão aqui." />}{requests.map((request) => { const member = story.members.find((item) => item.characterId === request.characterId); const institution = story.institutions.find((item) => item.id === request.institutionId); const config = defaults(request.id); const loan = story.loans.find((item) => item.id === request.id); return <article className="request-card" key={request.id}><small>{institution?.name ?? 'Instituição'}</small><strong>{member?.name ?? 'Jogador'} pediu {formatCoins(request.money)}</strong><p>{request.description}</p>{request.status === 'pending-master' && <div className="loan-editor"><label>Juros (%)<input type="number" min="0" step="0.1" value={config.interest} onChange={(event) => change(request.id, { interest: Math.max(0, Number(event.target.value) || 0) })} /></label><label>Parcelas<input type="number" min="1" step="1" value={config.installments} onChange={(event) => change(request.id, { installments: Math.max(1, Math.floor(Number(event.target.value) || 1)) })} /></label><label>Primeiro vencimento<input type="date" value={config.dueDate} onChange={(event) => change(request.id, { dueDate: event.target.value })} /></label><div className="request-actions"><button className="primary" onClick={() => void approve(request)}>Enviar proposta</button><button className="danger" onClick={() => void decline(request.id)}>Recusar</button></div></div>}{request.status === 'pending-player' && <span className="status-pill offline">Aguardando o jogador · {loan?.interestPercent}% · {loan?.installments} parcelas</span>}{request.status === 'accepted' && <span className="status-pill">Ativo · saldo devedor {loan?.remainingPence ?? 0} Pences</span>}{request.status === 'declined' && <span className="status-pill offline">Recusado</span>}</article> })}</section>
+  async function approve(request: typeof loanRequests[number]) { const config = defaults(request.id); const principal = toPence(request.money); const total = Math.ceil(principal * (1 + config.interest / 100)); const installments = Math.max(1, config.installments); const loan = { id: request.id, characterId: request.characterId, institutionId: request.institutionId, principalPence: principal, interestPercent: config.interest, installments, installmentPence: Math.ceil(total / installments), remainingPence: total, dueDate: config.dueDate, status: 'pending' as const }; await onSave({ ...story, loans: [...story.loans.filter((item) => item.id !== loan.id), loan], requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'pending-player' as const } : item) }); onToast('Proposta enviada ao jogador.') }
+  async function decline(requestId: string) { await onSave({ ...story, loans: story.loans.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item), requests: story.requests.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item) }); onToast('Pedido recusado.') }
+  async function approveConvert(request: typeof convertRequests[number]) {
+    const institution = story.institutions.find((item) => item.id === request.institutionId)
+    const member = story.members.find((item) => item.characterId === request.characterId)
+    const entry: LedgerEntry = { id: uid(), type: 'income', description: `Conversão aprovada para ${member?.name ?? 'jogador'}${request.description ? ` — ${request.description}` : ''}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: request.id, createdAt: new Date().toISOString() }
+    const nextStory = {
+      ...story,
+      institutions: institution ? story.institutions.map((item) => item.id === institution.id ? { ...item, ledger: [...item.ledger, entry] } : item) : story.institutions,
+      requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item),
+    }
+    await onSave(nextStory)
+    if (story.cloudMesaId) {
+      await postMessage(story.cloudMesaId, 'operation-result', {
+        type: 'institution-operation-result',
+        operation: {
+          type: 'institution-operation',
+          id: request.id,
+          characterId: request.characterId,
+          institutionId: request.institutionId,
+          institutionName: institution?.name ?? 'Banco',
+          action: 'convert',
+          description: request.description,
+          money: request.money,
+        },
+        ok: true,
+        message: 'Conversão aprovada pelo mestre.',
+        applyWallet: true,
+      } satisfies InstitutionOperationResult, request.characterId)
+    }
+    onToast('Conversão aprovada.')
+  }
+  return <section>
+    <div className="section-title"><div><p className="eyebrow">Aprovações</p><h3>Pedidos</h3></div></div>
+    {!loanRequests.length && !convertRequests.length && <EmptyState icon="◈" title="Nenhum pedido" text="Empréstimos e conversões de moeda dos jogadores aparecem aqui." />}
+    {convertRequests.map((request) => {
+      const member = story.members.find((item) => item.characterId === request.characterId)
+      const institution = story.institutions.find((item) => item.id === request.institutionId)
+      return <article className="request-card" key={request.id}>
+        <small>{institution?.name ?? 'Banco'} · Conversão</small>
+        <strong>{member?.name ?? 'Jogador'} pediu converter {formatCoins(request.money)}</strong>
+        <p>{request.description || 'Quebrar moedas no banco do mestre.'}</p>
+        {request.status === 'pending-master' && <div className="request-actions"><button className="primary" onClick={() => void approveConvert(request)}>Aprovar conversão</button><button className="danger" onClick={() => void decline(request.id)}>Recusar</button></div>}
+        {request.status === 'accepted' && <span className="status-pill">Convertido</span>}
+        {request.status === 'declined' && <span className="status-pill offline">Recusado</span>}
+      </article>
+    })}
+    {loanRequests.map((request) => { const member = story.members.find((item) => item.characterId === request.characterId); const institution = story.institutions.find((item) => item.id === request.institutionId); const config = defaults(request.id); const loan = story.loans.find((item) => item.id === request.id); return <article className="request-card" key={request.id}><small>{institution?.name ?? 'Instituição'} · Empréstimo</small><strong>{member?.name ?? 'Jogador'} pediu {formatCoins(request.money)}</strong><p>{request.description}</p>{request.status === 'pending-master' && <div className="loan-editor"><label>Juros (%)<input type="number" min="0" step="0.1" value={config.interest} onChange={(event) => change(request.id, { interest: Math.max(0, Number(event.target.value) || 0) })} /></label><label>Parcelas<input type="number" min="1" step="1" value={config.installments} onChange={(event) => change(request.id, { installments: Math.max(1, Math.floor(Number(event.target.value) || 1)) })} /></label><label>Primeiro vencimento<input type="date" value={config.dueDate} onChange={(event) => change(request.id, { dueDate: event.target.value })} /></label><div className="request-actions"><button className="primary" onClick={() => void approve(request)}>Enviar proposta</button><button className="danger" onClick={() => void decline(request.id)}>Recusar</button></div></div>}{request.status === 'pending-player' && <span className="status-pill offline">Aguardando o jogador · {loan?.interestPercent}% · {loan?.installments} parcelas</span>}{request.status === 'accepted' && <span className="status-pill">Ativo · saldo devedor {loan?.remainingPence ?? 0} Pences</span>}{request.status === 'declined' && <span className="status-pill offline">Recusado</span>}</article> })}
+  </section>
 }
 
 function PlayerRequests({ accesses, connected, onDecision }: { accesses: PlayerStoryAccess[]; connected: boolean; onDecision: (institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string) => string | null }) {

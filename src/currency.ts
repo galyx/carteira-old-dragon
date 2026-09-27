@@ -65,6 +65,21 @@ export function payWithChange(balance: CurrencyInput, payment: CurrencyInput): {
   }
 }
 
+/** Conversão pedida ao banco: quebra Coroas→Xelins ou Xelins→Pences, sem mudar o valor total. */
+export function bankConversionDelta(balance: CurrencyInput, request: CurrencyInput): CurrencyInput | null {
+  const parts = [request.crowns > 0, request.shillings > 0, request.pence > 0].filter(Boolean).length
+  if (parts !== 1) return null
+  if (request.crowns > 0) {
+    if (balance.crowns < request.crowns) return null
+    return { crowns: -request.crowns, shillings: request.crowns * SHILLINGS_PER_CROWN, pence: 0 }
+  }
+  if (request.shillings > 0) {
+    if (balance.shillings < request.shillings) return null
+    return { crowns: 0, shillings: -request.shillings, pence: request.shillings * PENCE_PER_SHILLING }
+  }
+  return null
+}
+
 export function addCoinBalances(values: CurrencyInput[]): CurrencyInput {
   return values.reduce<CurrencyInput>((total, value) => ({
     crowns: total.crowns + value.crowns,
