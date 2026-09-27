@@ -58,6 +58,7 @@ export function MasterCloudSession({
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null)
   const storyRef = useRef(story)
   const processing = useRef(false)
+  const handledOps = useRef(new Set<string>())
   const opHandlerRef = useRef(onInstitutionOperation)
   const accessForRef = useRef(storyAccessFor)
   const onSaveRef = useRef(onSave)
@@ -133,14 +134,17 @@ export function MasterCloudSession({
         const pending = await fetchPendingMessages(mesaId!, ['operation'])
         for (const message of pending) {
           const operation = message.payload as InstitutionOperation
+          await markMessagesConsumed([message.id as string])
+          if (handledOps.current.has(operation.id)) continue
+          handledOps.current.add(operation.id)
           const result = await opHandlerRef.current(operation)
           if (result.nextStory) storyRef.current = result.nextStory
           if (result.ok && result.access === undefined) {
             result.access = accessForRef.current(operation.characterId, storyRef.current) ?? undefined
           }
+          if (result.applyWallet === false && result.message.includes('já havia sido registrada')) continue
           const { nextStory: _ignored, ...payload } = result
           await postMessage(mesaId!, 'operation-result', payload, operation.characterId)
-          await markMessagesConsumed([message.id as string])
         }
 
         const joined = await listMembers(mesaId!)
@@ -320,9 +324,9 @@ export function PlayerCloudSession({
         }
         const results = await fetchPendingMessages(mesaId!, ['operation-result'], character.id)
         for (const message of results) {
+          await markMessagesConsumed([message.id as string])
           await Promise.resolve(onResultRef.current(message.payload as InstitutionOperationResult))
         }
-        if (results.length) await markMessagesConsumed(results.map((item) => item.id as string))
       } catch (error) {
         console.error(error)
       } finally {

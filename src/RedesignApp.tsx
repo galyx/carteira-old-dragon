@@ -64,9 +64,15 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
   const [accessRefresh, setAccessRefresh] = useState<(() => boolean) | null>(null)
   const [operationNotice, setOperationNotice] = useState('')
   const transactionsRef = useRef(transactions)
+  const appliedOpsRef = useRef(new Set<string>())
   const registerOperationSender = useCallback((sender: ((operation: InstitutionOperation) => boolean) | null) => setOperationSender(() => sender), [])
   const registerAccessRefresh = useCallback((sender: (() => boolean) | null) => setAccessRefresh(() => sender), [])
-  useEffect(() => { transactionsRef.current = transactions }, [transactions])
+  useEffect(() => {
+    transactionsRef.current = transactions
+    for (const item of transactions) {
+      if (item.referenceId) appliedOpsRef.current.add(item.referenceId)
+    }
+  }, [transactions])
   const balance = coinBalanceOf(transactions)
   const equivalent = toPence(balance)
   const navItems: readonly (readonly [string,string,string])[] = storyAccess.length ? [['wallet','Carteira','◉'],['institutions','Instituições','♜'],['session','Sessão','⌁'],['requests','Pedidos','✉'],['history','Histórico','≡']] : [['wallet','Carteira','◉'],['session','Entrar','⌁'],['requests','Pedidos','✉'],['history','Histórico','≡']]
@@ -84,19 +90,25 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
 
   const receiveOperation = useCallback(async (result: InstitutionOperationResult) => {
     setOperationNotice(result.message)
-    const currentTransactions = transactionsRef.current
-    if (!result.ok || currentTransactions.some((item) => item.referenceId === result.operation.id)) return
+    if (!result.ok) return
     const operation = result.operation
+    if (result.applyWallet !== true) return
+    if (appliedOpsRef.current.has(operation.id) || transactionsRef.current.some((item) => item.referenceId === operation.id)) return
+    appliedOpsRef.current.add(operation.id)
+
+    const currentTransactions = transactionsRef.current
     if (operation.action === 'convert') {
-      if (result.applyWallet !== true) return
       const delta = bankConversionDelta(coinBalanceOf(currentTransactions), operation.money)
-      if (!delta) return
+      if (!delta) { appliedOpsRef.current.delete(operation.id); return }
       await onSave({ id: uid(), characterId: character.id, type: 'income', description: `Conversão aprovada — ${operation.institutionName}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: operation.id, balanceDelta: delta, createdAt: new Date().toISOString() })
       return
     }
-    if (!['deposit', 'withdraw', 'loanAccept'].includes(operation.action)) return
+    if (!['deposit', 'withdraw', 'loanAccept'].includes(operation.action)) {
+      appliedOpsRef.current.delete(operation.id)
+      return
+    }
     const payment = operation.action === 'deposit' ? payWithChange(coinBalanceOf(currentTransactions), operation.money) : null
-    if (operation.action === 'deposit' && !payment) return
+    if (operation.action === 'deposit' && !payment) { appliedOpsRef.current.delete(operation.id); return }
     await onSave({
       id: uid(),
       characterId: character.id,
@@ -324,7 +336,7 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
       const nextInstitution = { ...institution, ledger: [...institution.ledger, entry] }
       const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === institution.id ? nextInstitution : item), requests: current.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item), loans: current.loans.map((item) => item.id === loan.id ? { ...item, status: 'active' as const } : item) }
       await onSave(nextStory)
-      return { type: 'institution-operation-result', operation: authoritativeOperation, ok: true, message: 'Empréstimo aceito e moedas recebidas.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory }
+      return { type: 'institution-operation-result', operation: authoritativeOperation, ok: true, message: 'Empréstimo aceito e moedas recebidas.', access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory, applyWallet: true }
     }
 
     const permissions = member.permissions[institution.id] ?? []
@@ -334,19 +346,19 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
     if (operation.action === 'withdraw' && !canWithdraw) return { type: 'institution-operation-result', operation, ok: false, message: 'O mestre não liberou retirada nesta instituição.' }
     if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe ao menos uma moeda.' }
     if (institution.ledger.some((entry) => entry.referenceId === operation.id)) {
-      return { type: 'institution-operation-result', operation, ok: true, message: 'Esta operação já havia sido registrada.', access: accessFor(operation.characterId, current) ?? undefined, nextStory: current }
+      return { type: 'institution-operation-result', operation, ok: true, message: 'Esta operação já havia sido registrada.', access: accessFor(operation.characterId, current) ?? undefined, nextStory: current, applyWallet: false }
     }
 
     const payment = operation.action === 'withdraw' ? payWithChange(coinBalanceOf(institution.ledger), operation.money) : null
-    if (operation.action === 'withdraw' && !payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui moedas suficientes para esta retirada.' }
+    if (operation.action === 'withdraw' && !payment) return { type: 'institution-operation-result', operation, ok: false, message: 'A instituição não possui moedas suficientes para esta retirada.', applyWallet: false }
     const limit = member.withdrawLimits[institution.id]
-    if (operation.action === 'withdraw' && limit !== undefined && toPence(operation.money) > limit) return { type: 'institution-operation-result', operation, ok: false, message: 'A retirada ultrapassa o limite definido pelo mestre.' }
+    if (operation.action === 'withdraw' && limit !== undefined && toPence(operation.money) > limit) return { type: 'institution-operation-result', operation, ok: false, message: 'A retirada ultrapassa o limite definido pelo mestre.', applyWallet: false }
 
     const entry: LedgerEntry = { id: uid(), type: operation.action === 'deposit' ? 'income' : 'expense', description: `${operation.action === 'deposit' ? `Depósito de ${member.name}` : `Retirada por ${member.name}`}${operation.description ? ` — ${operation.description}` : ''}`, date: today(), ...operation.money, totalPence: toPence(operation.money), referenceId: operation.id, balanceDelta: payment?.balanceDelta, createdAt: new Date().toISOString() }
     const nextInstitution = { ...institution, ledger: [...institution.ledger, entry] }
     const nextStory = { ...current, institutions: current.institutions.map((item) => item.id === institution.id ? nextInstitution : item) }
     await onSave(nextStory)
-    return { type: 'institution-operation-result', operation, ok: true, message: `${operation.action === 'deposit' ? 'Depósito' : 'Retirada'} concluído com sucesso.`, access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory }
+    return { type: 'institution-operation-result', operation, ok: true, message: `${operation.action === 'deposit' ? 'Depósito' : 'Retirada'} concluído com sucesso.`, access: accessFor(operation.characterId, nextStory) ?? undefined, nextStory, applyWallet: true }
   }
   return <><Page title={story.name} subtitle="História" onBack={onBack} trailing={<span className="status-pill">{story.cloudMesaId ? '● Online' : '● Local'}</span>}><div className="story-tabs">{([['overview','Visão geral'],['institutions','Instituições'],['characters','Personagens'],['players','Jogadores'],['loans','Pedidos'],['session','Sessão']] as const).map(([key,label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'overview' && <Overview story={story} total={total} onNavigate={setTab} />}{tab === 'institutions' && <Institutions story={story} onSave={onSave} />}{tab === 'characters' && <StoryCharacters story={story} onSave={onSave} />}{tab === 'players' && <Players story={story} onSave={onSave} />}{tab === 'loans' && <Loans story={story} onSave={onSave} onToast={onToast} />}<section className="surface session-surface connection-keeper" hidden={tab !== 'session'}><MasterCloudSession story={story} onSave={onSave} storyAccessFor={accessFor} onInstitutionOperation={handleInstitutionOperation} onToast={onToast} /></section></Page><BottomNav items={[['overview','Resumo','⌂'],['institutions','Instituições','♜'],['players','Jogadores','♙'],['session','Sessão','⌁']]} active={tab} onChange={(value) => setTab(value as typeof tab)} /></>
 }
