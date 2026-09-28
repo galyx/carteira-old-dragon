@@ -11,10 +11,12 @@ export type InstitutionOperation = {
   characterId: string
   institutionId: string
   institutionName: string
-  action: 'deposit' | 'withdraw' | 'depositRequest' | 'withdrawRequest' | 'loan' | 'loanAccept' | 'loanDecline' | 'loanPay' | 'convert'
+  action: 'deposit' | 'withdraw' | 'depositRequest' | 'withdrawRequest' | 'loan' | 'loanAccept' | 'loanDecline' | 'loanPay' | 'chargeOffer' | 'convert'
   description: string
   money: CurrencyInput
   requestId?: string
+  /** Data em que o jogador diz que consegue pagar (oferta de cobrança). */
+  dueDate?: string
 }
 
 export type InstitutionOperationResult = {

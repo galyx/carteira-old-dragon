@@ -69,6 +69,8 @@ export type MasterRequest = {
   dueDate?: string
   /** Empréstimo ligado a uma cobrança. */
   loanId?: string
+  /** Nota do jogador ao propor quanto/quando pode pagar. */
+  playerNote?: string
   status: 'pending-master' | 'pending-player' | 'accepted' | 'declined'
   createdAt: string
 }

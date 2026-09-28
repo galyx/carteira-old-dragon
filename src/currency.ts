@@ -20,12 +20,12 @@ export function fromPence(amount: number): CurrencyInput & { negative: boolean }
 
 export function formatMoney(amount: number): string {
   const { crowns, shillings, pence, negative } = fromPence(amount)
-  return `${negative ? '−' : ''}${crowns} C · ${shillings} X · ${pence} P`
+  return `${negative ? '−' : ''}${crowns} Coroas · ${shillings} Chirlins · ${pence} Pencils`
 }
 
 /** Mostra as moedas físicas sem normalizar ou trocar uma denominação por outra. */
 export function formatCoins({ crowns, shillings, pence }: CurrencyInput): string {
-  return `${crowns} C · ${shillings} S · ${pence} P`
+  return `${crowns} Coroas · ${shillings} Chirlins · ${pence} Pencils`
 }
 
 export function coinBalanceOf(entries: Array<Transaction | LedgerEntry>): CurrencyInput {
@@ -65,7 +65,7 @@ export function payWithChange(balance: CurrencyInput, payment: CurrencyInput): {
   }
 }
 
-/** Conversão pedida ao banco: quebra Coroas→Xelins ou Xelins→Pences, sem mudar o valor total. */
+/** Conversão pedida ao banco: quebra Coroas→Chirlins ou Chirlins→Pencils, sem mudar o valor total. */
 export function bankConversionDelta(balance: CurrencyInput, request: CurrencyInput): CurrencyInput | null {
   const parts = [request.crowns > 0, request.shillings > 0, request.pence > 0].filter(Boolean).length
   if (parts !== 1) return null

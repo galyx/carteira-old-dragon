@@ -3,7 +3,7 @@ import { balanceOf, coinBalanceOf, formatCoins, fromPence, payWithChange, PENCE_
 import type { Transaction } from './types'
 
 describe('moedas', () => {
-  it('converte Coroas, Xelins e Pences para a menor unidade', () => {
+  it('converte Coroas, Chirlins e Pencils para a menor unidade', () => {
     expect(PENCE_PER_CROWN).toBe(240)
     expect(toPence({ crowns: 1, shillings: 0, pence: 0 })).toBe(240)
     expect(toPence({ crowns: 0, shillings: 1, pence: 0 })).toBe(PENCE_PER_SHILLING)
@@ -26,7 +26,7 @@ describe('moedas', () => {
       { id: '2', characterId: 'c', type: 'expense', description: '', date: '2026-01-02', crowns: 1, shillings: 5, pence: 2, totalPence: 302, createdAt: '2026-01-02' }
     ]
     expect(coinBalanceOf(transactions)).toEqual({ crowns: 7, shillings: 195, pence: 1 })
-    expect(formatCoins({ crowns: 8, shillings: 200, pence: 3 })).toBe('8 C · 200 S · 3 P')
+    expect(formatCoins({ crowns: 8, shillings: 200, pence: 3 })).toBe('8 Coroas · 200 Chirlins · 3 Pencils')
   })
   it('troca moedas somente quando faltam peças para um pagamento', () => {
     expect(payWithChange(
@@ -38,7 +38,7 @@ describe('moedas', () => {
       { crowns: 1, shillings: 300, pence: 0 },
     )).toMatchObject({ remaining: { crowns: 7, shillings: 100, pence: 0 }, exchanged: false })
   })
-  it('quebra Coroa em Xelins quando o gasto não tem Xelins suficientes no bolso', () => {
+  it('quebra Coroa em Chirlins quando o gasto não tem Chirlins suficientes no bolso', () => {
     const payment = payWithChange(
       { crowns: 8, shillings: 0, pence: 6 },
       { crowns: 0, shillings: 2, pence: 0 },
