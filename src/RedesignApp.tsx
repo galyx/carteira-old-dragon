@@ -82,7 +82,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
     if (!operationSender) return 'Entre na mesa do mestre com o código antes de movimentar moedas.'
     if (action !== 'loanDecline' && !toPence(money)) return 'Informe ao menos uma moeda.'
     if ((action === 'deposit' || action === 'depositRequest' || action === 'loanPay') && !payWithChange(balance, money)) return 'A carteira não possui valor suficiente.'
-    if (action === 'convert' && !bankConversionDelta(balance, money)) return 'Informe só Coroas ou só Xelins para converter, com quantidade disponível na carteira.'
+    if (action === 'convert' && !bankConversionDelta(balance, money)) return 'Não há Coroas ou Xelins na carteira para converter.'
     const defaults: Partial<Record<InstitutionOperation['action'], string>> = {
       deposit: 'Depósito direto',
       depositRequest: 'Solicitação de depósito',
@@ -92,7 +92,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
       loanAccept: 'Empréstimo aceito',
       loanDecline: 'Empréstimo recusado',
       loanPay: 'Pagamento de empréstimo',
-      convert: 'Pedido de conversão ao banco',
+      convert: 'Pedido de conversão da carteira',
     }
     const operation: InstitutionOperation = { type: 'institution-operation', id: uid(), characterId: character.id, institutionId: institution.id, institutionName: institution.name, action, description: description.trim() || defaults[action] || 'Operação', money, requestId }
     return operationSender(operation) ? null : 'Não foi possível enviar. Verifique a conexão com a mesa.'
@@ -110,7 +110,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
     if (operation.action === 'convert') {
       const delta = bankConversionDelta(coinBalanceOf(currentTransactions), operation.money)
       if (!delta) { appliedOpsRef.current.delete(operation.id); return }
-      await onSave({ id: uid(), characterId: character.id, type: 'income', description: `Conversão aprovada — ${operation.institutionName}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: operation.id, balanceDelta: delta, createdAt: new Date().toISOString() })
+      await onSave({ id: uid(), characterId: character.id, type: 'income', description: 'Conversão aprovada na carteira', date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: operation.id, balanceDelta: delta, createdAt: new Date().toISOString() })
       return
     }
     if (!['deposit', 'withdraw', 'loanAccept', 'loanPay'].includes(operation.action)) {
@@ -141,12 +141,11 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
   }, [character.id, onSave])
 
   const primaryAccess = storyAccess[0] ?? null
-  const convertBanks = storyAccess.flatMap((access) => access.institutions.map((institution) => ({ id: institution.id, name: institution.name, storyName: access.storyName })))
 
   return <>
     <Page title={character.name} subtitle="Personagem" onBack={onBack} trailing={<select value={character.id} onChange={(event) => onSelect(event.target.value)}>{allCharacters.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}>
       <div className={equivalent < 0 ? 'hero-balance negative' : 'hero-balance'}><span>Moedas na carteira</span><strong>{formatCoins(balance)}</strong><small>Gasto no bolso quebra Coroa automaticamente · equivalente: {equivalent} Pences</small></div>
-      {tab === 'wallet' && <PlayerWallet character={character} balance={balance} banks={convertBanks} connected={Boolean(operationSender)} notice={operationNotice} onSave={onSave} onConvert={(institution, money, description) => sendOperation(institution, 'convert', money, description)} />}
+      {tab === 'wallet' && <PlayerWallet character={character} balance={balance} connected={Boolean(operationSender)} notice={operationNotice} onSave={onSave} onConvert={(money, description) => sendOperation({ id: 'carteira', name: 'Carteira' }, 'convert', money, description)} />}
       {tab === 'institutions' && <PlayerInstitutions accesses={storyAccess} connected={Boolean(operationSender)} notice={operationNotice} onRefresh={() => accessRefresh?.() ?? false} onOperate={sendOperation} />}
       <section className="surface connection-keeper" hidden={tab !== 'session'}><PlayerCloudSession character={character} transactions={transactions} access={primaryAccess} onAccess={onAccess} onOperationResult={receiveOperation} onOperationSender={registerOperationSender} onAccessRefreshSender={registerAccessRefresh} /></section>
       {tab === 'requests' && <>
@@ -212,28 +211,19 @@ function PlayerInstitutions({ accesses, connected, notice, onRefresh, onOperate 
   </section>
 }
 
-function PlayerWallet({ character, balance, banks, connected, notice, onSave, onConvert }: {
+function PlayerWallet({ character, balance, connected, notice, onSave, onConvert }: {
   character: Character
   balance: CurrencyInput
-  banks: Array<{ id: string; name: string; storyName: string }>
   connected: boolean
   notice: string
   onSave: (item: Transaction) => Promise<void>
-  onConvert: (institution: { id: string; name: string }, money: CurrencyInput, description: string) => string | null
+  onConvert: (money: CurrencyInput, description: string) => string | null
 }) {
   const [type, setType] = useState<'income' | 'expense'>('expense')
   const [description, setDescription] = useState('')
   const [money, setMoney] = useState(emptyMoney)
   const [error, setError] = useState('')
-  const [converting, setConverting] = useState(false)
-  const [convertMoney, setConvertMoney] = useState(emptyMoney)
-  const [convertDescription, setConvertDescription] = useState('')
-  const [convertBankId, setConvertBankId] = useState(banks[0]?.id ?? '')
   const [convertFeedback, setConvertFeedback] = useState('')
-
-  useEffect(() => {
-    if (!banks.some((bank) => bank.id === convertBankId)) setConvertBankId(banks[0]?.id ?? '')
-  }, [banks, convertBankId])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -249,35 +239,40 @@ function PlayerWallet({ character, balance, banks, connected, notice, onSave, on
     setMoney(emptyMoney); setDescription(''); setError('')
   }
 
-  function submitConvert(event: FormEvent) {
-    event.preventDefault()
-    const bank = banks.find((item) => item.id === convertBankId)
-    if (!bank) { setConvertFeedback('Nenhuma instituição disponível na mesa.'); return }
-    const errorMessage = onConvert(bank, convertMoney, convertDescription)
+  function requestConversion(kind: 'crowns' | 'shillings') {
+    setConvertFeedback('')
+    if (!connected) { setConvertFeedback('Entre na mesa para pedir conversão.'); return }
+    const moneyToConvert = kind === 'crowns'
+      ? { crowns: balance.crowns, shillings: 0, pence: 0 }
+      : { crowns: 0, shillings: balance.shillings, pence: 0 }
+    if (!toPence(moneyToConvert)) {
+      setConvertFeedback(kind === 'crowns' ? 'Você não tem Coroas para quebrar.' : 'Você não tem Xelins para quebrar.')
+      return
+    }
+    const label = kind === 'crowns'
+      ? `Quebrar ${balance.crowns} Coroa(s) em ${balance.crowns * 20} Xelins`
+      : `Quebrar ${balance.shillings} Xelin(s) em ${balance.shillings * 12} Pences`
+    const errorMessage = onConvert(moneyToConvert, label)
     if (errorMessage) { setConvertFeedback(errorMessage); return }
-    setConvertFeedback('Pedido de conversão enviado ao mestre.')
-    setConvertMoney(emptyMoney)
-    setConvertDescription('')
-    setTimeout(() => setConverting(false), 800)
+    setConvertFeedback('Pedido enviado. Aguarde o mestre aprovar.')
   }
 
   return <>
     <section className="surface"><div className="section-title"><div><p className="eyebrow">Movimentação</p><h3>Novo lançamento</h3></div><div className="segmented"><button className={type === 'expense' ? 'active' : ''} onClick={() => setType('expense')}>Gasto</button><button className={type === 'income' ? 'active' : ''} onClick={() => setType('income')}>Ganho</button></div></div><form className="clean-form" onSubmit={(event) => void submit(event)}><label>Descrição<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Ex.: Estalagem" /></label><MoneyFields money={money} setMoney={setMoney} />{error && <p className="error">{error}</p>}<button className="primary wide">Registrar {type === 'income' ? 'ganho' : 'gasto'}</button></form></section>
     <section className="surface" style={{ marginTop: '0.85rem' }}>
-      <div className="section-title"><div><p className="eyebrow">Banco da mesa</p><h3>Conversão de moedas</h3></div>
-        {connected && banks.length > 0 && <button type="button" onClick={() => { setConverting(true); setConvertFeedback('') }}>Pedir conversão</button>}
+      <div className="section-title"><div><p className="eyebrow">Sua carteira</p><h3>Pedir conversão</h3></div></div>
+      <p className="helper">{connected ? 'Um toque envia o pedido. O mestre só aprova ou recusa — sem digitar valor.' : 'Entre na mesa para pedir conversão ao mestre.'}</p>
+      <div className="request-actions">
+        <button type="button" className="primary" disabled={!connected || balance.crowns <= 0} onClick={() => requestConversion('crowns')}>
+          Quebrar Coroas → Xelins{balance.crowns > 0 ? ` (${balance.crowns})` : ''}
+        </button>
+        <button type="button" className="primary" disabled={!connected || balance.shillings <= 0} onClick={() => requestConversion('shillings')}>
+          Quebrar Xelins → Pences{balance.shillings > 0 ? ` (${balance.shillings})` : ''}
+        </button>
       </div>
-      <p className="helper">{!connected ? 'Entre na mesa para pedir conversão ao banco do mestre.' : !banks.length ? 'Aguarde o mestre criar uma instituição (banco/taverna).' : 'Quebre Coroas em Xelins ou Xelins em Pences com aprovação do mestre.'}</p>
+      {convertFeedback && <p className={convertFeedback.includes('enviado') ? 'success' : 'error'}>{convertFeedback}</p>}
       {notice && <p className="operation-notice" role="status">{notice}</p>}
     </section>
-    {converting && <Modal title="Pedir conversão" onClose={() => setConverting(false)}><form className="clean-form" onSubmit={submitConvert}>
-      <p className="helper">Informe só Coroas (viram Xelins) ou só Xelins (viram Pences). O mestre precisa aprovar.</p>
-      {banks.length > 1 && <label>Instituição<select value={convertBankId} onChange={(event) => setConvertBankId(event.target.value)}>{banks.map((bank) => <option value={bank.id} key={bank.id}>{bank.name} · {bank.storyName}</option>)}</select></label>}
-      <label>Descrição<input value={convertDescription} onChange={(event) => setConvertDescription(event.target.value)} placeholder="Ex.: Quebrar 1 Coroa em Xelins" /></label>
-      <MoneyFields money={convertMoney} setMoney={setConvertMoney} />
-      {convertFeedback && <p className={convertFeedback.startsWith('Pedido') ? 'success' : 'error'}>{convertFeedback}</p>}
-      <button className="primary wide">Enviar pedido ao mestre</button>
-    </form></Modal>}
   </>
 }
 
@@ -324,18 +319,27 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
   async function handleInstitutionOperation(operation: InstitutionOperation): Promise<InstitutionOperationResult> {
     let current = story
     let member = current.members.find((item) => item.characterId === operation.characterId)
-    const institution = current.institutions.find((item) => item.id === operation.institutionId)
-    if (!institution) return { type: 'institution-operation-result', operation, ok: false, message: 'Instituição não reconhecida.' }
     if (!member) {
       member = { characterId: operation.characterId, name: 'Jogador', permissions: {}, withdrawLimits: {}, sharedCharacterIds: [], connectedAt: new Date().toISOString() }
       current = { ...current, members: [...current.members, member] }
       await onSave(current)
     }
 
-    if (operation.action === 'convert' || operation.action === 'depositRequest' || operation.action === 'withdrawRequest') {
-      const requestType = operation.action === 'convert' ? 'convert' as const : operation.action === 'depositRequest' ? 'deposit' as const : 'withdraw' as const
-      const permissionNeeded = requestType === 'convert' ? null : requestType === 'deposit' ? 'deposit' : 'withdraw'
-      if (permissionNeeded && !(member.permissions[institution.id] ?? []).includes(permissionNeeded)) {
+    if (operation.action === 'convert') {
+      if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Nada para converter na carteira.', applyWallet: false }
+      if (current.requests.some((item) => item.id === operation.id)) return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido já registrado.', access: accessFor(operation.characterId, current) ?? undefined, applyWallet: false, nextStory: current }
+      const request = { id: operation.id, characterId: operation.characterId, institutionId: 'carteira', type: 'convert' as const, money: operation.money, description: operation.description, status: 'pending-master' as const, createdAt: new Date().toISOString() }
+      const nextStory = { ...current, requests: [...current.requests, request] }
+      await onSave(nextStory)
+      return { type: 'institution-operation-result', operation, ok: true, message: 'Pedido de conversão da carteira enviado ao mestre.', access: accessFor(operation.characterId, nextStory) ?? undefined, applyWallet: false, nextStory }
+    }
+
+    const institution = current.institutions.find((item) => item.id === operation.institutionId)
+    if (!institution) return { type: 'institution-operation-result', operation, ok: false, message: 'Instituição não reconhecida.', applyWallet: false }
+
+    if (operation.action === 'depositRequest' || operation.action === 'withdrawRequest') {
+      const requestType = operation.action === 'depositRequest' ? 'deposit' as const : 'withdraw' as const
+      if (!(member.permissions[institution.id] ?? []).includes(requestType)) {
         return { type: 'institution-operation-result', operation, ok: false, message: `O mestre não liberou solicitações de ${requestType === 'deposit' ? 'depósito' : 'retirada'} nesta instituição.`, applyWallet: false }
       }
       if (!toPence(operation.money)) return { type: 'institution-operation-result', operation, ok: false, message: 'Informe o valor.', applyWallet: false }
@@ -343,8 +347,7 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
       const request = { id: operation.id, characterId: operation.characterId, institutionId: operation.institutionId, type: requestType, money: operation.money, description: operation.description, status: 'pending-master' as const, createdAt: new Date().toISOString() }
       const nextStory = { ...current, requests: [...current.requests, request] }
       await onSave(nextStory)
-      const label = requestType === 'convert' ? 'conversão' : requestType === 'deposit' ? 'depósito' : 'retirada'
-      return { type: 'institution-operation-result', operation, ok: true, message: `Pedido de ${label} enviado ao mestre.`, access: accessFor(operation.characterId, nextStory) ?? undefined, applyWallet: false, nextStory }
+      return { type: 'institution-operation-result', operation, ok: true, message: `Pedido de ${requestType === 'deposit' ? 'depósito' : 'retirada'} enviado ao mestre.`, access: accessFor(operation.characterId, nextStory) ?? undefined, applyWallet: false, nextStory }
     }
 
     if (operation.action === 'loan') {
@@ -497,12 +500,9 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
     onToast(`Cobrança enviada para ${member?.name ?? 'jogador'}: ${formatCoins(request.money)}.`)
   }
   async function approveConvert(request: typeof convertRequests[number]) {
-    const institution = story.institutions.find((item) => item.id === request.institutionId)
     const member = story.members.find((item) => item.characterId === request.characterId)
-    const entry: LedgerEntry = { id: uid(), type: 'income', description: `Conversão aprovada para ${member?.name ?? 'jogador'}${request.description ? ` — ${request.description}` : ''}`, date: today(), crowns: 0, shillings: 0, pence: 0, totalPence: 0, referenceId: request.id, createdAt: new Date().toISOString() }
     const nextStory = {
       ...story,
-      institutions: institution ? story.institutions.map((item) => item.id === institution.id ? { ...item, ledger: [...item.ledger, entry] } : item) : story.institutions,
       requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' as const } : item),
     }
     await onSave(nextStory)
@@ -513,18 +513,18 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
           type: 'institution-operation',
           id: request.id,
           characterId: request.characterId,
-          institutionId: request.institutionId,
-          institutionName: institution?.name ?? 'Banco',
+          institutionId: 'carteira',
+          institutionName: 'Carteira',
           action: 'convert',
           description: request.description,
           money: request.money,
         },
         ok: true,
-        message: 'Conversão aprovada pelo mestre.',
+        message: 'Conversão da carteira aprovada.',
         applyWallet: true,
       } satisfies InstitutionOperationResult, request.characterId)
     }
-    onToast('Conversão aprovada.')
+    onToast(`Conversão aprovada para ${member?.name ?? 'jogador'}.`)
   }
   async function approveMoneyRequest(request: typeof moneyRequests[number]) {
     const institution = story.institutions.find((item) => item.id === request.institutionId)
@@ -606,13 +606,15 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
     })}
     {convertRequests.map((request) => {
       const member = story.members.find((item) => item.characterId === request.characterId)
-      const institution = story.institutions.find((item) => item.id === request.institutionId)
+      const summary = request.money.crowns > 0
+        ? `${request.money.crowns} Coroa(s) → ${request.money.crowns * 20} Xelins`
+        : `${request.money.shillings} Xelin(s) → ${request.money.shillings * 12} Pences`
       return <article className="request-card" key={request.id}>
-        <small>{institution?.name ?? 'Banco'} · Conversão</small>
-        <strong>{member?.name ?? 'Jogador'} pediu converter {formatCoins(request.money)}</strong>
-        <p>{request.description || 'Quebrar moedas no banco do mestre.'}</p>
-        {request.status === 'pending-master' && <div className="request-actions"><button className="primary" onClick={() => void approveConvert(request)}>Aprovar conversão</button><button className="danger" onClick={() => void decline(request.id)}>Recusar</button></div>}
-        {request.status === 'accepted' && <span className="status-pill">Convertido</span>}
+        <small>Carteira · Conversão</small>
+        <strong>{member?.name ?? 'Jogador'} pediu {summary}</strong>
+        <p>{request.description || 'Conversão só da carteira do jogador.'}</p>
+        {request.status === 'pending-master' && <div className="request-actions"><button className="primary" onClick={() => void approveConvert(request)}>Aprovar</button><button className="danger" onClick={() => void decline(request.id)}>Recusar</button></div>}
+        {request.status === 'accepted' && <span className="status-pill">Aprovado</span>}
         {request.status === 'declined' && <span className="status-pill offline">Recusado</span>}
       </article>
     })}
