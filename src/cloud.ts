@@ -1,5 +1,6 @@
 import type { CurrencyInput, PlayerStoryAccess, Story, Transaction } from './types'
 import { supabase, supabaseConfigured } from './supabase'
+import type { WalletConvertKind } from './currency'
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const CODE_LENGTH = 9
@@ -17,6 +18,8 @@ export type InstitutionOperation = {
   requestId?: string
   /** Data em que o jogador diz que consegue pagar (oferta de cobrança). */
   dueDate?: string
+  /** Tipo de conversão da carteira. */
+  convertKind?: WalletConvertKind
 }
 
 export type InstitutionOperationResult = {

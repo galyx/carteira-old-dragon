@@ -71,6 +71,8 @@ export type MasterRequest = {
   loanId?: string
   /** Nota do jogador ao propor quanto/quando pode pagar. */
   playerNote?: string
+  /** Tipo de conversão da carteira (quebrar / juntar / valores definitivos). */
+  convertKind?: 'break-crowns' | 'break-chirlins' | 'join-chirlins' | 'join-pencils' | 'normalize'
   status: 'pending-master' | 'pending-player' | 'accepted' | 'declined'
   createdAt: string
 }

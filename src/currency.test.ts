@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { balanceOf, coinBalanceOf, formatCoins, fromPence, payWithChange, PENCE_PER_CROWN, PENCE_PER_SHILLING, toPence } from './currency'
+import { balanceOf, bankConversionDelta, coinBalanceOf, formatCoins, fromPence, payWithChange, PENCE_PER_CROWN, PENCE_PER_SHILLING, toPence } from './currency'
 import type { Transaction } from './types'
 
 describe('moedas', () => {
@@ -47,5 +47,15 @@ describe('moedas', () => {
     expect(payment?.exchanged).toBe(true)
     expect(payment?.remaining).toEqual({ crowns: 7, shillings: 18, pence: 6 })
     expect(toPence(payment!.remaining)).toBe(toPence({ crowns: 8, shillings: 0, pence: 6 }) - 24)
+  })
+  it('junta Chirlins em Coroas e Pencils em Chirlins', () => {
+    expect(bankConversionDelta({ crowns: 0, shillings: 300, pence: 0 }, { crowns: 0, shillings: 300, pence: 0 }, 'join-chirlins'))
+      .toEqual({ crowns: 15, shillings: -300, pence: 0 })
+    expect(bankConversionDelta({ crowns: 1, shillings: 5, pence: 30 }, { crowns: 0, shillings: 0, pence: 30 }, 'join-pencils'))
+      .toEqual({ crowns: 0, shillings: 2, pence: -24 })
+  })
+  it('normaliza a carteira para valores definitivos', () => {
+    expect(bankConversionDelta({ crowns: 0, shillings: 25, pence: 15 }, { crowns: 0, shillings: 0, pence: 0 }, 'normalize'))
+      .toEqual({ crowns: 1, shillings: -19, pence: -12 })
   })
 })
