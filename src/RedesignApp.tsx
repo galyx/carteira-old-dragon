@@ -150,7 +150,7 @@ function PlayerDashboard({ character, allCharacters, transactions, storyAccess, 
       <section className="surface connection-keeper" hidden={tab !== 'session'}><PlayerCloudSession character={character} transactions={transactions} access={primaryAccess} onAccess={onAccess} onOperationResult={receiveOperation} onOperationSender={registerOperationSender} onAccessRefreshSender={registerAccessRefresh} /></section>
       {tab === 'requests' && <>
         <PlayerDebts accesses={storyAccess} balance={balance} connected={Boolean(operationSender)} notice={operationNotice} onPay={(institution, money, description, loanId) => sendOperation(institution, 'loanPay', money, description, loanId)} />
-        <PlayerRequests accesses={storyAccess} connected={Boolean(operationSender)} onDecision={sendOperation} />
+        <PlayerRequests accesses={storyAccess} connected={Boolean(operationSender)} balance={balance} onDecision={sendOperation} />
       </>}
       {tab === 'history' && <History entries={transactions} />}
     </Page>
@@ -407,7 +407,7 @@ function StoryDashboard({ story, onSave, onBack, onToast }: { story: Story; onSa
         ...current,
         institutions: current.institutions.map((item) => item.id === loanInstitution.id ? { ...item, ledger: [...item.ledger, entry] } : item),
         loans: current.loans.map((item) => item.id === loan.id ? nextLoan : item),
-        requests: current.requests.map((item) => item.type === 'charge' && item.characterId === operation.characterId && item.institutionId === loan.institutionId && item.status === 'pending-player' ? { ...item, status: 'accepted' as const } : item),
+        requests: current.requests.map((item) => item.type === 'charge' && item.status === 'pending-player' && item.characterId === operation.characterId && (item.loanId === loan.id || (!item.loanId && item.institutionId === loan.institutionId)) ? { ...item, status: 'accepted' as const } : item),
       }
       await onSave(nextStory)
       return {
@@ -474,30 +474,67 @@ function Players({ story, onSave }: { story: Story; onSave: (story: Story) => Pr
 
 function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story) => Promise<void>; onToast: (text: string) => void }) {
   const [terms, setTerms] = useState<Record<string, { interest: number; installments: number; dueDate: string }>>({})
+  const [chargeLoanId, setChargeLoanId] = useState<string | null>(null)
+  const [chargeMoney, setChargeMoney] = useState(emptyMoney)
+  const [interestLoanId, setInterestLoanId] = useState<string | null>(null)
+  const [extraInterest, setExtraInterest] = useState(5)
   const loanRequests = story.requests.filter((item) => item.type === 'loan')
   const convertRequests = story.requests.filter((item) => item.type === 'convert')
   const moneyRequests = story.requests.filter((item) => item.type === 'deposit' || item.type === 'withdraw')
   const activeLoans = story.loans.filter((item) => item.status === 'active')
   const defaults = (id: string) => terms[id] ?? { interest: 10, installments: 3, dueDate: today() }
   const change = (id: string, values: Partial<ReturnType<typeof defaults>>) => setTerms((current) => ({ ...current, [id]: { ...defaults(id), ...values } }))
+  const chargeTarget = activeLoans.find((item) => item.id === chargeLoanId) ?? null
+  const interestTarget = activeLoans.find((item) => item.id === interestLoanId) ?? null
   async function approve(request: typeof loanRequests[number]) { const config = defaults(request.id); const principal = toPence(request.money); const total = Math.ceil(principal * (1 + config.interest / 100)); const installments = Math.max(1, config.installments); const loan = { id: request.id, characterId: request.characterId, institutionId: request.institutionId, principalPence: principal, interestPercent: config.interest, installments, installmentPence: Math.ceil(total / installments), remainingPence: total, dueDate: config.dueDate, status: 'pending' as const }; await onSave({ ...story, loans: [...story.loans.filter((item) => item.id !== loan.id), loan], requests: story.requests.map((item) => item.id === request.id ? { ...item, status: 'pending-player' as const } : item) }); onToast('Proposta enviada ao jogador.') }
   async function decline(requestId: string) { await onSave({ ...story, loans: story.loans.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item), requests: story.requests.map((item) => item.id === requestId ? { ...item, status: 'declined' as const } : item) }); onToast('Pedido recusado.') }
-  async function chargeLoan(loan: Loan) {
-    const amount = fromPence(Math.min(loan.installmentPence, loan.remainingPence))
-    const member = story.members.find((item) => item.characterId === loan.characterId)
-    const institution = story.institutions.find((item) => item.id === loan.institutionId)
+  function openCharge(loan: Loan, preset: 'installment' | 'full' | 'custom' = 'installment') {
+    const remaining = fromPence(loan.remainingPence)
+    const installment = fromPence(Math.min(loan.installmentPence, loan.remainingPence))
+    setChargeLoanId(loan.id)
+    setChargeMoney(preset === 'full'
+      ? { crowns: remaining.crowns, shillings: remaining.shillings, pence: remaining.pence }
+      : { crowns: installment.crowns, shillings: installment.shillings, pence: installment.pence })
+  }
+  async function sendCharge(event: FormEvent) {
+    event.preventDefault()
+    if (!chargeTarget) return
+    const payPence = toPence(chargeMoney)
+    if (!payPence) { onToast('Informe um valor para cobrar.'); return }
+    if (payPence > chargeTarget.remainingPence) { onToast('Valor maior que o saldo devedor.'); return }
+    const member = story.members.find((item) => item.characterId === chargeTarget.characterId)
+    const institution = story.institutions.find((item) => item.id === chargeTarget.institutionId)
     const request = {
       id: uid(),
-      characterId: loan.characterId,
-      institutionId: loan.institutionId,
+      characterId: chargeTarget.characterId,
+      institutionId: chargeTarget.institutionId,
+      loanId: chargeTarget.id,
       type: 'charge' as const,
-      money: { crowns: amount.crowns, shillings: amount.shillings, pence: amount.pence },
-      description: `Cobrança de parcela — ${institution?.name ?? 'instituição'} (empréstimo)`,
+      money: chargeMoney,
+      description: `Cobrança do empréstimo — ${institution?.name ?? 'instituição'}`,
       status: 'pending-player' as const,
       createdAt: new Date().toISOString(),
     }
     await onSave({ ...story, requests: [...story.requests, request] })
-    onToast(`Cobrança enviada para ${member?.name ?? 'jogador'}: ${formatCoins(request.money)}.`)
+    setChargeLoanId(null)
+    onToast(`Cobrança de ${formatCoins(chargeMoney)} enviada para ${member?.name ?? 'jogador'}.`)
+  }
+  async function applyExtraInterest(event: FormEvent) {
+    event.preventDefault()
+    if (!interestTarget) return
+    const percent = Math.max(0, extraInterest)
+    if (!percent) { onToast('Informe um percentual de juros.'); return }
+    const added = Math.ceil(interestTarget.remainingPence * (percent / 100))
+    if (!added) { onToast('O acréscimo ficou zerado neste saldo.'); return }
+    const nextLoan: Loan = {
+      ...interestTarget,
+      interestPercent: Math.round((interestTarget.interestPercent + percent) * 10) / 10,
+      remainingPence: interestTarget.remainingPence + added,
+      installmentPence: Math.max(interestTarget.installmentPence, Math.ceil((interestTarget.remainingPence + added) / Math.max(1, interestTarget.installments))),
+    }
+    await onSave({ ...story, loans: story.loans.map((item) => item.id === nextLoan.id ? nextLoan : item) })
+    setInterestLoanId(null)
+    onToast(`Juros +${percent}% aplicados. Dívida subiu ${formatMoney(added)}.`)
   }
   async function approveConvert(request: typeof convertRequests[number]) {
     const member = story.members.find((item) => item.characterId === request.characterId)
@@ -586,9 +623,34 @@ function Loans({ story, onSave, onToast }: { story: Story; onSave: (story: Story
           <span>Juros: <b>{loan.interestPercent}%</b></span>
           <span>Vencimento: <b>{new Date(`${loan.dueDate}T12:00:00`).toLocaleDateString('pt-BR')}</b></span>
         </div>
-        <div className="request-actions"><button className="primary" onClick={() => void chargeLoan(loan)}>Cobrar parcela</button></div>
+        <div className="request-actions">
+          <button className="primary" onClick={() => openCharge(loan, 'installment')}>Enviar cobrança</button>
+          <button onClick={() => openCharge(loan, 'full')}>Cobrar total</button>
+          <button onClick={() => { setInterestLoanId(loan.id); setExtraInterest(5) }}>Aumentar juros</button>
+        </div>
       </article>
     })}
+    {chargeTarget && <Modal title="Enviar cobrança" onClose={() => setChargeLoanId(null)}>
+      <form className="clean-form" onSubmit={(event) => void sendCharge(event)}>
+        <p className="helper">O jogador recebe o pedido e pode pagar este valor ou outro (até o saldo devedor de {formatMoney(chargeTarget.remainingPence)}).</p>
+        <div className="request-actions">
+          <button type="button" onClick={() => openCharge(chargeTarget, 'installment')}>Usar parcela</button>
+          <button type="button" onClick={() => openCharge(chargeTarget, 'full')}>Usar total</button>
+        </div>
+        <MoneyFields money={chargeMoney} setMoney={setChargeMoney} />
+        <button className="primary wide">Enviar cobrança ao jogador</button>
+      </form>
+    </Modal>}
+    {interestTarget && <Modal title="Aumentar juros da dívida" onClose={() => setInterestLoanId(null)}>
+      <form className="clean-form" onSubmit={(event) => void applyExtraInterest(event)}>
+        <p className="helper">Saldo atual: {formatMoney(interestTarget.remainingPence)}. O percentual extra é aplicado sobre esse saldo.</p>
+        <label>Aumentar juros em (%)
+          <input type="number" min="0" step="0.5" value={extraInterest} onChange={(event) => setExtraInterest(Math.max(0, Number(event.target.value) || 0))} />
+        </label>
+        <p className="helper">Prévia: +{formatMoney(Math.ceil(interestTarget.remainingPence * (Math.max(0, extraInterest) / 100)))} na dívida.</p>
+        <button className="primary wide">Aplicar juros</button>
+      </form>
+    </Modal>}
     <div className="section-title" style={{ marginTop: '1.25rem' }}><div><p className="eyebrow">Aprovações</p><h3>Pedidos</h3></div></div>
     {!loanRequests.length && !convertRequests.length && !moneyRequests.length && <EmptyState icon="◈" title="Nenhum pedido" text="Depósitos, retiradas, empréstimos e conversões aparecem aqui." />}
     {moneyRequests.map((request) => {
@@ -690,18 +752,87 @@ function PlayerDebts({ accesses, balance, connected, notice, onPay }: {
   </section>
 }
 
-function PlayerRequests({ accesses, connected, onDecision }: { accesses: PlayerStoryAccess[]; connected: boolean; onDecision: (institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string) => string | null }) {
+function PlayerRequests({ accesses, connected, balance, onDecision }: {
+  accesses: PlayerStoryAccess[]
+  connected: boolean
+  balance: CurrencyInput
+  onDecision: (institution: { id: string; name: string }, action: InstitutionOperation['action'], money: CurrencyInput, description: string, requestId?: string) => string | null
+}) {
   const requests = accesses.flatMap((access) => (access.requests ?? []).map((request) => ({
     request,
     access,
     institution: access.institutions.find((item) => item.id === request.institutionId) ?? { id: request.institutionId, name: 'Instituição' },
-    loan: (access.loans ?? []).find((item) => item.id === request.id) ?? (access.loans ?? []).find((item) => item.institutionId === request.institutionId && item.status === 'active'),
+    loan: (access.loans ?? []).find((item) => item.id === request.loanId)
+      ?? (access.loans ?? []).find((item) => item.id === request.id)
+      ?? (access.loans ?? []).find((item) => item.institutionId === request.institutionId && item.status === 'active'),
   }))).sort((a,b) => b.request.createdAt.localeCompare(a.request.createdAt))
+  const [payingChargeId, setPayingChargeId] = useState<string | null>(null)
+  const [payMoney, setPayMoney] = useState(emptyMoney)
+  const [payFeedback, setPayFeedback] = useState('')
+  const paying = requests.find((item) => item.request.id === payingChargeId) ?? null
+
+  function openChargePay(requestId: string, suggested: CurrencyInput) {
+    setPayingChargeId(requestId)
+    setPayMoney(suggested)
+    setPayFeedback('')
+  }
+
+  function submitChargePay(event: FormEvent) {
+    event.preventDefault()
+    if (!paying?.loan) { setPayFeedback('Empréstimo não encontrado.'); return }
+    if (!toPence(payMoney)) { setPayFeedback('Informe um valor.'); return }
+    if (toPence(payMoney) > paying.loan.remainingPence) { setPayFeedback('Valor maior que a dívida restante.'); return }
+    if (!payWithChange(balance, payMoney)) { setPayFeedback('Moedas insuficientes na carteira.'); return }
+    const error = onDecision(paying.institution, 'loanPay', payMoney, paying.request.description, paying.loan.id)
+    if (error) { setPayFeedback(error); return }
+    setPayFeedback('Pagamento enviado. Aguarde confirmação…')
+    setTimeout(() => setPayingChargeId(null), 900)
+  }
+
   if (!requests.length) return <EmptyState icon="✉" title="Nenhuma solicitação" text="Pedidos de depósito, retirada, empréstimo, cobrança e conversão aparecem aqui." />
-  return <section><div className="section-title"><div><p className="eyebrow">Aguardando decisões</p><h3>Pedidos</h3></div></div>{requests.map(({ request, access, institution, loan }) => {
-    const kind = request.type === 'loan' ? 'Empréstimo' : request.type === 'convert' ? 'Conversão' : request.type === 'deposit' ? 'Depósito' : request.type === 'withdraw' ? 'Retirada' : request.type === 'charge' ? 'Cobrança' : 'Pedido'
-    return <article className="request-card" key={request.id}><small>{access.storyName} · {institution.name} · {kind}</small><strong>{kind} de {formatCoins(request.money)}</strong><p>{request.description}</p>{request.status === 'pending-master' && <span className="status-pill offline">Aguardando o mestre</span>}{request.status === 'pending-player' && request.type === 'loan' && loan && <><div className="loan-terms"><span>Juros: <b>{loan.interestPercent}%</b></span><span>Parcelas: <b>{loan.installments}× de {formatMoney(loan.installmentPence)}</b></span><span>Total a devolver: <b>{formatMoney(loan.remainingPence)}</b></span></div><div className="request-actions"><button className="primary" disabled={!connected} onClick={() => onDecision(institution, 'loanAccept', request.money, request.description, request.id)}>Aceitar e receber</button><button className="danger" disabled={!connected} onClick={() => onDecision(institution, 'loanDecline', emptyMoney, request.description, request.id)}>Recusar</button></div></>}{request.status === 'pending-player' && request.type === 'charge' && <div className="request-actions"><button className="primary" disabled={!connected || !loan} onClick={() => loan && onDecision(institution, 'loanPay', request.money, request.description, loan.id)}>Pagar cobrança</button></div>}{request.status === 'accepted' && <span className="status-pill">Aprovado</span>}{request.status === 'declined' && <span className="status-pill offline">Recusado</span>}</article>
-  })}</section>
+  return <section>
+    <div className="section-title"><div><p className="eyebrow">Aguardando decisões</p><h3>Pedidos</h3></div></div>
+    {requests.map(({ request, access, institution, loan }) => {
+      const kind = request.type === 'loan' ? 'Empréstimo' : request.type === 'convert' ? 'Conversão' : request.type === 'deposit' ? 'Depósito' : request.type === 'withdraw' ? 'Retirada' : request.type === 'charge' ? 'Cobrança' : 'Pedido'
+      return <article className="request-card" key={request.id}>
+        <small>{access.storyName} · {institution.name} · {kind}</small>
+        <strong>{kind} de {formatCoins(request.money)}</strong>
+        <p>{request.description}</p>
+        {request.status === 'pending-master' && <span className="status-pill offline">Aguardando o mestre</span>}
+        {request.status === 'pending-player' && request.type === 'loan' && loan && <>
+          <div className="loan-terms">
+            <span>Juros: <b>{loan.interestPercent}%</b></span>
+            <span>Parcelas: <b>{loan.installments}× de {formatMoney(loan.installmentPence)}</b></span>
+            <span>Total a devolver: <b>{formatMoney(loan.remainingPence)}</b></span>
+          </div>
+          <div className="request-actions">
+            <button className="primary" disabled={!connected} onClick={() => onDecision(institution, 'loanAccept', request.money, request.description, request.id)}>Aceitar e receber</button>
+            <button className="danger" disabled={!connected} onClick={() => onDecision(institution, 'loanDecline', emptyMoney, request.description, request.id)}>Recusar</button>
+          </div>
+        </>}
+        {request.status === 'pending-player' && request.type === 'charge' && <>
+          <p className="helper">O mestre cobrou este valor. Você pode pagar exatamente isso ou outro valor (até a dívida).</p>
+          <div className="request-actions">
+            <button className="primary" disabled={!connected || !loan} onClick={() => openChargePay(request.id, request.money)}>Pagar / ajustar valor</button>
+          </div>
+        </>}
+        {request.status === 'accepted' && <span className="status-pill">Aprovado</span>}
+        {request.status === 'declined' && <span className="status-pill offline">Recusado</span>}
+      </article>
+    })}
+    {paying && <Modal title="Pagar cobrança" onClose={() => setPayingChargeId(null)}>
+      <form className="clean-form" onSubmit={submitChargePay}>
+        <p className="helper">
+          Cobrado: {formatCoins(paying.request.money)}.
+          {paying.loan ? ` Dívida restante: ${formatMoney(paying.loan.remainingPence)}.` : ''}
+          Você pode mudar o valor abaixo antes de confirmar.
+        </p>
+        <MoneyFields money={payMoney} setMoney={setPayMoney} />
+        {payFeedback && <p className={payFeedback.includes('enviado') ? 'success' : 'error'}>{payFeedback}</p>}
+        <button className="primary wide" disabled={!connected}>Confirmar pagamento</button>
+      </form>
+    </Modal>}
+  </section>
 }
 
 function History({ entries }: { entries: Transaction[] }) { const sorted = [...entries].sort((a,b) => b.createdAt.localeCompare(a.createdAt)); return <section className="surface"><h3>Histórico</h3>{!sorted.length && <EmptyState icon="≡" title="Nenhuma movimentação" text="Ganhos e gastos aparecerão aqui." />}{sorted.map((item) => <div className="history-row" key={item.id}><span className={`movement-icon ${item.type}`}>{item.type === 'income' ? '+' : '−'}</span><div><strong>{item.description}</strong><small>{new Date(`${item.date}T12:00:00`).toLocaleDateString('pt-BR')}</small></div><b>{item.type === 'income' ? '+' : '−'}{formatCoins(item)}</b></div>)}</section> }
